@@ -203,8 +203,14 @@ export class FSWatcher extends EventEmitter<Events> {
     this.#ignorePermissionErrors = options.ignorePermissionErrors ?? false;
     this.#persistent = options.persistent ?? true;
     const rescanInterval = options.rescanInterval ?? 0;
-    if (!(rescanInterval >= 0 && rescanInterval <= MAX_TIMER_MS))
-      throw new RangeError(`rescanInterval must be 0 to ${MAX_TIMER_MS} ms, got ${rescanInterval}`);
+    // `false` and `""` would pass the range test by coercion, and setTimeout reads them as 1 ms
+    if (
+      typeof rescanInterval !== "number" ||
+      !(rescanInterval >= 0 && rescanInterval <= MAX_TIMER_MS)
+    )
+      throw new RangeError(
+        `rescanInterval must be a number from 0 to ${MAX_TIMER_MS} ms, got ${String(rescanInterval)}`,
+      );
     this.#rescanInterval = rescanInterval;
     const awf = options.awaitWriteFinish;
     this.#settle = awf

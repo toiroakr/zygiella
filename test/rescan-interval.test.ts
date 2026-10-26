@@ -89,10 +89,10 @@ test("the next read is scheduled once the previous one has finished, not on a fi
   }
 });
 
-test.each([-1, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 31])(
-  "rescanInterval of %s is rejected",
+test.each([-1, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 31, false, true, "", "1000"])(
+  "rescanInterval of %j is rejected",
   (value) => {
-    expect(() => watch(dir, { rescanInterval: value })).toThrow(RangeError);
+    expect(() => watch(dir, { rescanInterval: value as number })).toThrow(RangeError);
   },
 );
 
