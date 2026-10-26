@@ -31,9 +31,12 @@ treats `?` as a glob). Grep for the error codes and the words for the problem (`
 | Watchman (`facebook/watchman`)             | C++        | recrawl and `fresh_instance` handling                                                                                  |
 | libuv (`libuv/libuv`)                      | C          | `src/unix/linux.c`, `src/unix/fsevents.c`: what Node's `fs.watch` can and cannot tell us                               |
 
-Take at least chokidar, notify and fsnotify. Add the others when the problem touches them (a snapshot or recrawl
-question: Watchman and @parcel/watcher; what Node can report at all: libuv). A watcher that is not read is listed as
-not read; do not fill it in from memory.
+chokidar and @parcel/watcher are always read: chokidar is the API zygiella copies, and @parcel/watcher is the other
+one that is widely used from Node. Also take notify and fsnotify. Add the others when the problem touches them (a
+snapshot or recrawl question: Watchman; what Node can report at all: libuv; a polling or timer question: watchdog).
+Deciding that a watcher does not touch the problem is not a reason to skip it when the problem is about a timer, a
+fallback or lost events; read it and write down that it has no answer. A watcher that is not read is listed as not
+read with the reason, and is never filled in from memory.
 
 ## 3. Write the findings as a table
 
