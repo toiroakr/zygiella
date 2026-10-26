@@ -1,0 +1,31 @@
+{
+  "name": "naruko",
+  "version": "0.0.0",
+  "description": "A dependency-free file watcher for Node.js, API-compatible with the subset of chokidar that most tools use",
+  "keywords": ["watch", "watcher", "fs.watch", "chokidar"],
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "files": ["dist"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "default": "./dist/index.mjs"
+    }
+  },
+  "scripts": {
+    "build": "tsdown",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsdown": "^0.23.2",
+    "typescript": "^5.9.0",
+    "vitest": "^5.0.5"
+  },
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=22.18.0"
+  }
+}
