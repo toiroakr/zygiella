@@ -14,7 +14,7 @@ let dir: string;
 let watchers: FSWatcher[];
 
 beforeEach(async () => {
-  dir = await realpath(await mkdtemp(join(tmpdir(), "naruko-")));
+  dir = await realpath(await mkdtemp(join(tmpdir(), "zygiella-")));
   watchers = [];
 });
 
@@ -256,7 +256,7 @@ describe("paths that do not exist yet", () => {
 
 describe("add / unwatch / close", () => {
   test("add starts reporting a new path and unwatch stops it", async () => {
-    const other = await realpath(await mkdtemp(join(tmpdir(), "naruko-other-")));
+    const other = await realpath(await mkdtemp(join(tmpdir(), "zygiella-other-")));
     try {
       const { w, seen } = await start(dir);
       w.add(other);

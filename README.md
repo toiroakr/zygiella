@@ -1,11 +1,11 @@
-# naruko
+# zygiella
 
 A dependency-free file watcher for Node.js (>= 22.18) built on `fs.watch`. It covers the part of the
 [chokidar](https://github.com/paulmillr/chokidar) API that most tools actually use, so replacing it is
 usually a one-line change to the import.
 
 ```ts
-import { watch } from "naruko";
+import { watch } from "zygiella";
 
 const watcher = watch(["src", "config.yml"], {
   ignored: /node_modules/,

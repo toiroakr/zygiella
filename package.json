@@ -1,5 +1,5 @@
 {
-  "name": "naruko",
+  "name": "zygiella",
   "version": "0.0.0",
   "description": "A dependency-free file watcher for Node.js, API-compatible with the subset of chokidar that most tools use",
   "keywords": ["watch", "watcher", "fs.watch", "chokidar"],
