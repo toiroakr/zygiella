@@ -11,6 +11,13 @@ chokidar API that most tools use: `watch(paths, options)`, the `FSWatcher` event
 not add the rest of chokidar's surface (globs, polling, `cwd`, `stats`); being small is the point. `rescan()` is not polling: it runs only when the user calls
 it, so an interval is the user's to write.
 
+## Planning
+
+Before choosing a design for any change to how zygiella watches, reports, recovers or fails, run the
+`survey-watchers` skill (`.claude/skills/survey-watchers/SKILL.md`): check in their source how chokidar, notify,
+fsnotify and the other well-known watchers solve the same problem, and write that into the plan and the PR body.
+Do it first, not after the design is settled.
+
 ## Common Development Commands
 
 This repository uses **pnpm** (pinned via the `packageManager` field). Do not use npm or yarn.
