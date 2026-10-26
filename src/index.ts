@@ -207,6 +207,10 @@ export class FSWatcher extends EventEmitter<Events> {
       this.#roots.delete(path);
       this.#missingAtStart.delete(path);
       for (const key of this.#denied) if (within(path, key)) this.#denied.delete(key);
+      // a directory whose watch failed has no entry, so #remove below never releases it
+      for (const key of this.#unwatched)
+        if (within(path, key) && ![...this.#roots].some((root) => within(root, key)))
+          this.#unwatched.delete(key);
       this.#kinds.delete(path);
       const probe = this.#probes.get(path);
       this.#probes.delete(path);
@@ -309,6 +313,7 @@ export class FSWatcher extends EventEmitter<Events> {
     if (this.#closed || !this.#roots.has(root)) return;
     if (this.#ignored.byPath(root)) return;
     const previousProbe = this.#probes.get(root);
+    const previousParent = this.#kinds.get(root) === "file" ? dirname(root) : undefined;
     if (mode !== "live") this.#missingAtStart.delete(root);
     let info = await this.#stat(root).catch((error: NodeJS.ErrnoException) => {
       this.#fail(error, root);
@@ -349,6 +354,7 @@ export class FSWatcher extends EventEmitter<Events> {
       if (previousProbe) attached.add(previousProbe);
       attached.delete(ancestor);
       for (const stale of attached) this.#release(stale);
+      if (previousParent) this.#release(previousParent);
       // the root may have been created between the stat above and the watch being attached
       if (
         await this.#stat(root).then(
@@ -368,6 +374,7 @@ export class FSWatcher extends EventEmitter<Events> {
       else this.#probes.delete(root);
       this.#ensureNative(info.isDirectory() ? root : dirname(root));
       if (previousProbe) this.#release(previousProbe);
+      if (previousParent) this.#release(previousParent);
       return;
     }
     this.#probes.delete(root);
@@ -383,6 +390,7 @@ export class FSWatcher extends EventEmitter<Events> {
       await this.#visit(root, info, 0, mode, [], link);
     }
     if (previousProbe) this.#release(previousProbe);
+    if (previousParent) this.#release(previousParent);
   }
 
   #stat(path: string): Promise<Stats> {

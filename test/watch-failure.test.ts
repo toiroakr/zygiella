@@ -112,6 +112,8 @@ describe("a watch that could not be established", () => {
     const { w, seen } = await start(dir);
     native.fail.clear();
     await w.rescan();
+    // rescan() does not wait for FSEvents to start delivering as ready does
+    await w.add(dir).ready;
     expect(w.unwatched).toEqual([]);
     await writeFile(join(dir, "sub", "a.txt"), "1");
     await until(() => seen.length > 0);
@@ -177,5 +179,37 @@ describe("a watch that could not be established", () => {
     await writeFile(join(dir, "sub", "a.txt"), "1");
     await until(() => seen.length > 0);
     expect(seen).toEqual([["add", join(dir, "sub", "a.txt")]]);
+  });
+
+  test("the parent of a watched file is no longer listed once the file's directory is removed", async () => {
+    await mkdir(join(dir, "sub"));
+    await writeFile(join(dir, "sub", "a.txt"), "1");
+    native.fail.add(join(dir, "sub"));
+    const { w } = await start(join(dir, "sub", "a.txt"));
+    expect(w.unwatched).toEqual([join(dir, "sub")]);
+    await rm(join(dir, "sub"), { recursive: true });
+    await w.rescan();
+    expect(w.unwatched).toEqual([]);
+  });
+
+  test("the parent of a watched file is no longer listed once the file becomes a directory", async () => {
+    await mkdir(join(dir, "sub"));
+    await writeFile(join(dir, "sub", "a.txt"), "1");
+    native.fail.add(join(dir, "sub"));
+    const { w } = await start(join(dir, "sub", "a.txt"));
+    native.fail.clear();
+    await rm(join(dir, "sub", "a.txt"));
+    await mkdir(join(dir, "sub", "a.txt"));
+    await w.rescan();
+    expect(w.unwatched).toEqual([]);
+  });
+
+  test("a root that is unwatched from its own error listener is not left in the list", async () => {
+    native.fail.add(dir);
+    const w = watch(dir, { ignoreInitial: true });
+    watchers.push(w);
+    w.on("error", () => w.unwatch(dir));
+    await new Promise<void>((r) => w.once("ready", () => r()));
+    expect(w.unwatched).toEqual([]);
   });
 });
