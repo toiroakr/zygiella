@@ -157,7 +157,7 @@ export class FSWatcher extends EventEmitter<Events> {
 
   async #watch(roots: string[]): Promise<ReadyResult> {
     await this.#start(roots, this.#ignoreInitial ? "quiet" : "initial");
-    const missing = [...new Set(roots)].filter((root) => this.#missingAtStart.delete(root));
+    const missing = [...new Set(roots)].filter((root) => this.#missingAtStart.has(root));
     // fs.watch returns before the OS starts delivering (FSEvents on macOS): a change made in that gap is never reported
     await new Promise<void>((done) => setTimeout(done, READY_SETTLE_MS));
     return { missing };
@@ -196,6 +196,7 @@ export class FSWatcher extends EventEmitter<Events> {
     if (this.#closed || !this.#roots.has(root)) return;
     if (this.#ignored(root)) return;
     const previousProbe = this.#probes.get(root);
+    if (mode !== "live") this.#missingAtStart.delete(root);
     const info = await stat(root).catch((error: NodeJS.ErrnoException) => {
       this.#fail(error, root);
       if (mode !== "live" && VANISHED.has(error.code ?? "")) this.#missingAtStart.add(root);

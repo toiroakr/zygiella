@@ -414,6 +414,15 @@ describe("missing paths", () => {
     await expect(w.add(missing).ready).resolves.toEqual({ missing: [missing] });
   });
 
+  test("overlapping adds of the same missing path each return it", async () => {
+    const missing = join(dir, "overlap");
+    const { w } = await start(dir);
+    const first = w.add(missing).ready;
+    const second = w.add(missing).ready;
+    await expect(first).resolves.toEqual({ missing: [missing] });
+    await expect(second).resolves.toEqual({ missing: [missing] });
+  });
+
   test("a path added while missing is watched once it appears", async () => {
     const { w, seen } = await start(dir);
     const missing = join(dir, "added-later");
