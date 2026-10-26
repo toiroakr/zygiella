@@ -163,6 +163,22 @@ describe("atomic", () => {
     expect(seen).toEqual([["change", join(dir, "a.txt")]]);
   });
 
+  test("a file that add() finds again while its unlink is held back still waits for awaitWriteFinish", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { w, seen } = await start(dir, {
+      atomic: 300,
+      awaitWriteFinish: { stabilityThreshold: 400, pollInterval: 25 },
+    });
+    await rm(join(dir, "a.txt"));
+    await settle(100);
+    await writeFile(join(dir, "a.txt"), "22");
+    await w.add(dir).ready;
+    expect(seen).toEqual([]);
+    await until(() => seen.length > 0);
+    await settle(600);
+    expect(seen).toEqual([["change", join(dir, "a.txt")]]);
+  });
+
   test("atomic false reports unlink and add as they happen", async () => {
     await writeFile(join(dir, "a.txt"), "1");
     const { seen } = await start(dir, { atomic: false });

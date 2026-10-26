@@ -358,8 +358,7 @@ export class FSWatcher extends EventEmitter<Events> {
       this.#setEntry(path, next);
       if (next.dir) {
         if (mode !== "quiet") this.#dispatch("addDir", path);
-      } else if (mode === "live") this.#announce("add", path);
-      else if (this.#takeHeld(path)) this.#dispatch("change", path);
+      } else if (mode === "live" || this.#unlinks.has(path)) this.#announce("add", path);
       else if (mode === "initial") this.#dispatch("add", path);
       if (next.dir && left > 0) await this.#syncDir(path, left - 1, mode, ancestry);
       return;
