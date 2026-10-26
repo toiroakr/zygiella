@@ -1199,7 +1199,7 @@ describe("persistent", () => {
     children.push(proc);
     let out = "";
     proc.stdout.on("data", (chunk) => (out += chunk));
-    const exited = new Promise<number | null>((r) => proc.once("exit", (code) => r(code)));
+    const exited = new Promise<number | null>((r) => proc.once("close", (code) => r(code)));
     return { proc, exited, output: () => out };
   }
 
