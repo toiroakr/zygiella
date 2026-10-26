@@ -80,7 +80,8 @@ jobs:
         env:
           RESULTS: ${{ needs.check.result }} ${{ needs.test.result }}
         run: |
-          for result in $RESULTS; do
+          read -r -a results <<< "$RESULTS"
+          for result in "${results[@]}"; do
             if [ "$result" != "success" ]; then
               echo "A required job finished as: $result"
               exit 1
