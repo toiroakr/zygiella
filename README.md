@@ -206,7 +206,7 @@ tree, so keep the interval long for a large one.
   are not noticed, and the directory is listed in `watcher.unwatched`. The same goes for a native watcher that
   reports an error and cannot be set up again. zygiella does not retry by itself: `rescan()` reads the directory
   again, reports what changed, and tries to watch it again, after which it leaves `unwatched`. If it still fails,
-  `error` is emitted again. Raise the limit (on Linux, `fs.inotify.max_user_watches` and
+  `error` is emitted again (except a permission error, which follows the rules below). Raise the limit (on Linux, `fs.inotify.max_user_watches` and
   `fs.inotify.max_user_instances`; `ulimit -n` for open files), or call `rescan()` on a timer as described in
   [Environments without native events](#environments-without-native-events).
 - Nothing above a watched path is watched. A link given to `watch()`, or a link whose target is outside the watched

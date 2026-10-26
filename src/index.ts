@@ -207,15 +207,13 @@ export class FSWatcher extends EventEmitter<Events> {
       this.#roots.delete(path);
       this.#missingAtStart.delete(path);
       for (const key of this.#denied) if (within(path, key)) this.#denied.delete(key);
-      // a directory whose watch failed has no entry, so #remove below never releases it
-      for (const key of this.#unwatched)
-        if (within(path, key) && ![...this.#roots].some((root) => within(root, key)))
-          this.#unwatched.delete(key);
       this.#kinds.delete(path);
       const probe = this.#probes.get(path);
       this.#probes.delete(path);
       this.#remove(path, false, (key) => ![...this.#roots].some((root) => within(root, key)));
       if (probe) this.#release(probe);
+      // a directory whose watch failed has no entry, so #remove never released it
+      for (const key of this.#unwatched) if (within(path, key)) this.#release(key);
       const parent = dirname(path);
       if (parent !== path) this.#release(parent);
     }

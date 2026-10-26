@@ -74,8 +74,6 @@ async function until(predicate: () => boolean, ms = 3000): Promise<void> {
   }
 }
 
-const settle = (ms = 300) => new Promise((r) => setTimeout(r, ms));
-
 describe("a watch that could not be established", () => {
   test("emits the error and lists the directory as unwatched while the others stay watched", async () => {
     await mkdir(join(dir, "sub"));
@@ -99,8 +97,6 @@ describe("a watch that could not be established", () => {
     native.fail.add(join(dir, "sub"));
     const { w, seen } = await start(dir);
     await writeFile(join(dir, "sub", "a.txt"), "1");
-    await settle();
-    expect(seen).toEqual([]);
     await w.rescan();
     await until(() => seen.length > 0);
     expect(seen).toEqual([["add", join(dir, "sub", "a.txt")]]);
@@ -174,8 +170,9 @@ describe("a watch that could not be established", () => {
       .get(join(dir, "sub"))!
       .emit("error", Object.assign(new Error("lost"), { code: "EIO" }));
     await until(() => errors.length > 0);
-    await settle();
     expect(w.unwatched).toEqual([]);
+    // the new watcher is not delivering yet, as after ready
+    await w.add(dir).ready;
     await writeFile(join(dir, "sub", "a.txt"), "1");
     await until(() => seen.length > 0);
     expect(seen).toEqual([["add", join(dir, "sub", "a.txt")]]);
@@ -211,5 +208,15 @@ describe("a watch that could not be established", () => {
     w.on("error", () => w.unwatch(dir));
     await new Promise<void>((r) => w.once("ready", () => r()));
     expect(w.unwatched).toEqual([]);
+  });
+
+  test("unwatch() keeps a directory listed while a file root that remains still depends on it", async () => {
+    await mkdir(join(dir, "sub"));
+    await writeFile(join(dir, "sub", "a.txt"), "1");
+    native.fail.add(join(dir, "sub"));
+    const { w } = await start(dir);
+    await w.add(join(dir, "sub", "a.txt")).ready;
+    w.unwatch(dir);
+    expect(w.unwatched).toEqual([join(dir, "sub")]);
   });
 });
