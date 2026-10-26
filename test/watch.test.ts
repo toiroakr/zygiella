@@ -97,6 +97,201 @@ describe("file events", () => {
   });
 });
 
+describe("atomic", () => {
+  test("a file deleted and created again within the window is reported as one change", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { seen } = await start(dir, { atomic: 500 });
+    await rm(join(dir, "a.txt"));
+    await settle(150);
+    await writeFile(join(dir, "a.txt"), "22");
+    await until(() => seen.length > 0);
+    await settle(700);
+    expect(seen).toEqual([["change", join(dir, "a.txt")]]);
+  });
+
+  test("the window is 100 ms by default", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { seen } = await start(dir);
+    await rm(join(dir, "a.txt"));
+    await settle(30);
+    await writeFile(join(dir, "a.txt"), "22");
+    await until(() => seen.length > 0);
+    await settle();
+    expect(seen).toEqual([["change", join(dir, "a.txt")]]);
+  });
+
+  test("a file that is not created again is reported as unlink once the window has passed", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { seen } = await start(dir, { atomic: 200 });
+    const deleted = Date.now();
+    await rm(join(dir, "a.txt"));
+    await until(() => seen.length > 0);
+    expect(Date.now() - deleted).toBeGreaterThanOrEqual(190);
+    expect(seen).toEqual([["unlink", join(dir, "a.txt")]]);
+  });
+
+  test("with the default window an unlink is reported once 100 ms have passed", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { seen } = await start(dir);
+    const deleted = Date.now();
+    await rm(join(dir, "a.txt"));
+    await until(() => seen.length > 0);
+    expect(Date.now() - deleted).toBeGreaterThanOrEqual(90);
+    expect(seen).toEqual([["unlink", join(dir, "a.txt")]]);
+  });
+
+  test("a file created again after the unlink was reported is reported as add", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { seen } = await start(dir, { atomic: 50 });
+    await rm(join(dir, "a.txt"));
+    await until(() => seen.length > 0);
+    await writeFile(join(dir, "a.txt"), "22");
+    await until(() => seen.length > 1);
+    expect(seen).toEqual([
+      ["unlink", join(dir, "a.txt")],
+      ["add", join(dir, "a.txt")],
+    ]);
+  });
+
+  test("a file that add() finds again while its unlink is held back is reported as change, not add and unlink", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { w, seen } = await start(dir, { atomic: 300 });
+    await rm(join(dir, "a.txt"));
+    await settle(100);
+    await writeFile(join(dir, "a.txt"), "22");
+    await w.add(dir).ready;
+    await settle(600);
+    expect(seen).toEqual([["change", join(dir, "a.txt")]]);
+  });
+
+  test("a file that add() finds again while its unlink is held back still waits for awaitWriteFinish", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { w, seen } = await start(dir, {
+      atomic: 300,
+      awaitWriteFinish: { stabilityThreshold: 400, pollInterval: 25 },
+    });
+    await rm(join(dir, "a.txt"));
+    await settle(100);
+    await writeFile(join(dir, "a.txt"), "22");
+    await w.add(dir).ready;
+    expect(seen).toEqual([]);
+    await until(() => seen.length > 0);
+    await settle(600);
+    expect(seen).toEqual([["change", join(dir, "a.txt")]]);
+  });
+
+  test("atomic false reports unlink and add as they happen", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { seen } = await start(dir, { atomic: false });
+    await rm(join(dir, "a.txt"));
+    await until(() => seen.length > 0);
+    await writeFile(join(dir, "a.txt"), "22");
+    await until(() => seen.length > 1);
+    expect(seen).toEqual([
+      ["unlink", join(dir, "a.txt")],
+      ["add", join(dir, "a.txt")],
+    ]);
+  });
+
+  test("a directory created where a held-back file was is reported after the file's unlink", async () => {
+    await writeFile(join(dir, "x"), "1");
+    const { seen } = await start(dir, { atomic: 500 });
+    await rm(join(dir, "x"));
+    await settle(100);
+    await mkdir(join(dir, "x"));
+    await until(() => seen.length > 1);
+    await settle();
+    expect(seen).toEqual([
+      ["unlink", join(dir, "x")],
+      ["addDir", join(dir, "x")],
+    ]);
+  });
+
+  test("a removed directory still reports its files before itself", async () => {
+    await mkdir(join(dir, "sub"));
+    await writeFile(join(dir, "sub", "a.txt"), "1");
+    await writeFile(join(dir, "sub", "b.txt"), "1");
+    const { seen } = await start(dir, { atomic: 500 });
+    await rm(join(dir, "sub", "a.txt"));
+    await settle(50);
+    await rm(join(dir, "sub"), { recursive: true });
+    await until(() => seen.some(([e]) => e === "unlinkDir"));
+    expect(seen.map(([e]) => e).slice(-1)).toEqual(["unlinkDir"]);
+    expect(seen).toHaveLength(3);
+  });
+
+  test("a watched file that is deleted and created again is reported as change", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { seen } = await start(join(dir, "a.txt"), { atomic: 500 });
+    await rm(join(dir, "a.txt"));
+    await settle(100);
+    await writeFile(join(dir, "a.txt"), "22");
+    await until(() => seen.length > 0);
+    await settle(700);
+    expect(seen).toEqual([["change", join(dir, "a.txt")]]);
+  });
+
+  test("with awaitWriteFinish the file is recreated within the window, and one change is reported once it is stable", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { seen } = await start(dir, {
+      atomic: 500,
+      awaitWriteFinish: { stabilityThreshold: 150, pollInterval: 25 },
+    });
+    await rm(join(dir, "a.txt"));
+    await settle(100);
+    await writeFile(join(dir, "a.txt"), "22");
+    expect(seen).toEqual([]);
+    await until(() => seen.length > 0);
+    await settle(700);
+    expect(seen).toEqual([["change", join(dir, "a.txt")]]);
+  });
+
+  test("with awaitWriteFinish a file deleted again before it is stable is reported as unlink", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { seen } = await start(dir, {
+      atomic: 100,
+      awaitWriteFinish: { stabilityThreshold: 300, pollInterval: 25 },
+    });
+    await rm(join(dir, "a.txt"));
+    await settle(30);
+    await writeFile(join(dir, "a.txt"), "22");
+    await settle(60);
+    await rm(join(dir, "a.txt"));
+    await until(() => seen.length > 0);
+    await settle(500);
+    expect(seen).toEqual([["unlink", join(dir, "a.txt")]]);
+  });
+
+  test("unwatch drops an unlink that is still being held back", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { w, seen } = await start(dir, { atomic: 300 });
+    await rm(join(dir, "a.txt"));
+    await settle(100);
+    w.unwatch(dir);
+    await settle(500);
+    expect(seen).toEqual([]);
+  });
+
+  test("editor temporary files are ignored", async () => {
+    const { seen } = await start(dir);
+    await writeFile(join(dir, ".a.txt.swp"), "1");
+    await writeFile(join(dir, ".a.txt.swx"), "1");
+    await writeFile(join(dir, "a.txt~"), "1");
+    await writeFile(join(dir, ".subl1234.tmp"), "1");
+    await writeFile(join(dir, "a.txt"), "1");
+    await until(() => seen.length > 0);
+    await settle();
+    expect(seen).toEqual([["add", join(dir, "a.txt")]]);
+  });
+
+  test("editor temporary files are reported with atomic false", async () => {
+    const { seen } = await start(dir, { atomic: false });
+    await writeFile(join(dir, "a.txt~"), "1");
+    await until(() => seen.length > 0);
+    expect(seen).toEqual([["add", join(dir, "a.txt~")]]);
+  });
+});
+
 describe("directory events", () => {
   test("a created directory is reported as addDir, and a file inside it as add", async () => {
     const { seen } = await start(dir);
@@ -172,6 +367,135 @@ describe("symbolic links", () => {
       expect.stringContaining(join("loop", "a.txt")),
     );
     expect(seen).toContainEqual(["addDir", join(dir, "loop")]);
+  });
+
+  test("a link to a directory is descended into, and what is below it is reported under the link's path", async () => {
+    const root = join(dir, "root");
+    const target = join(dir, "target");
+    await mkdir(root);
+    await mkdir(target);
+    await writeFile(join(target, "a.txt"), "1");
+    await symlink(target, join(root, "link"), "junction");
+    const { seen } = await start(root, { ignoreInitial: false });
+    expect(seen).toEqual(
+      expect.arrayContaining([
+        ["addDir", join(root, "link")],
+        ["add", join(root, "link", "a.txt")],
+      ]),
+    );
+    await writeFile(join(target, "b.txt"), "1");
+    await until(() => seen.some(([, path]) => path === join(root, "link", "b.txt")));
+  });
+
+  test("a directory reachable by a link and by its own path is descended into by both", async () => {
+    await mkdir(join(dir, "real"));
+    await writeFile(join(dir, "real", "x.txt"), "1");
+    await symlink(join(dir, "real"), join(dir, "alias"), "junction");
+    const { seen } = await start(dir, { ignoreInitial: false });
+    expect(seen).toEqual(
+      expect.arrayContaining([
+        ["add", join(dir, "real", "x.txt")],
+        ["add", join(dir, "alias", "x.txt")],
+      ]),
+    );
+  });
+
+  test("a link to an ancestor several levels up is reported but not descended into", async () => {
+    await mkdir(join(dir, "a", "b"), { recursive: true });
+    await symlink(join(dir, "a"), join(dir, "a", "b", "up"), "junction");
+    const { seen } = await start(dir, { ignoreInitial: false });
+    expect(seen).toContainEqual(["addDir", join(dir, "a", "b", "up")]);
+    expect(seen.map(([, path]) => path)).not.toContainEqual(
+      expect.stringContaining(join("up", "b")),
+    );
+  });
+
+  test("pointing a followed link at another directory reports what was below it as removed and what is below the new target as added", async () => {
+    const root = join(dir, "root");
+    await mkdir(root);
+    await mkdir(join(dir, "t1"));
+    await mkdir(join(dir, "t2"));
+    await writeFile(join(dir, "t1", "a.txt"), "1");
+    await writeFile(join(dir, "t2", "b.txt"), "1");
+    await symlink(join(dir, "t1"), join(root, "link"), "junction");
+    const { seen } = await start(root);
+    await rm(join(root, "link"));
+    await symlink(join(dir, "t2"), join(root, "link"), "junction");
+    await until(() => seen.some(([e, p]) => e === "add" && p === join(root, "link", "b.txt")));
+    expect(seen).toContainEqual(["unlink", join(root, "link", "a.txt")]);
+    await writeFile(join(dir, "t2", "c.txt"), "1");
+    await until(() => seen.some(([e, p]) => e === "add" && p === join(root, "link", "c.txt")));
+  });
+
+  test("a link given as the watched path is watched as itself with followSymlinks false", async () => {
+    await mkdir(join(dir, "t1"));
+    await mkdir(join(dir, "t2"));
+    await writeFile(join(dir, "t1", "a.txt"), "1");
+    await symlink(join(dir, "t1"), join(dir, "link"), "junction");
+    const { seen } = await start(join(dir, "link"), {
+      ignoreInitial: false,
+      followSymlinks: false,
+    });
+    expect(seen).toEqual([["add", join(dir, "link")]]);
+    await rm(join(dir, "link"));
+    await symlink(join(dir, "t2"), join(dir, "link"), "junction");
+    await until(() => seen.length > 1);
+    await settle();
+    expect(seen).toEqual([
+      ["add", join(dir, "link")],
+      ["change", join(dir, "link")],
+    ]);
+  });
+
+  test("a followed link that is also given as a watched path is not reported as removed and added again", async () => {
+    const root = join(dir, "root");
+    await mkdir(root);
+    await mkdir(join(dir, "target"));
+    await symlink(join(dir, "target"), join(root, "link"), "junction");
+    const { seen } = await start([root, join(root, "link")]);
+    await settle();
+    expect(seen).toEqual([]);
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "with followSymlinks false and awaitWriteFinish a link whose target is missing is still reported",
+    async () => {
+      const { seen } = await start(dir, {
+        followSymlinks: false,
+        awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 25 },
+      });
+      await symlink(join(dir, "missing"), join(dir, "link"));
+      await until(() => seen.length > 0);
+      expect(seen).toEqual([["add", join(dir, "link")]]);
+    },
+  );
+
+  test("with followSymlinks false a link is watched as itself: reported as add and not descended into", async () => {
+    const root = join(dir, "root");
+    const target = join(dir, "target");
+    await mkdir(root);
+    await mkdir(target);
+    await writeFile(join(target, "a.txt"), "1");
+    await symlink(target, join(root, "link"), "junction");
+    const { seen } = await start(root, { ignoreInitial: false, followSymlinks: false });
+    expect(seen).toContainEqual(["add", join(root, "link")]);
+    expect(seen.map(([, path]) => path)).not.toContainEqual(
+      expect.stringContaining(join("link", "a.txt")),
+    );
+  });
+
+  test("with followSymlinks false pointing a link somewhere else is reported as change", async () => {
+    const root = join(dir, "root");
+    await mkdir(root);
+    await mkdir(join(dir, "t1"));
+    await mkdir(join(dir, "t2"));
+    await symlink(join(dir, "t1"), join(root, "link"), "junction");
+    const { seen } = await start(root, { followSymlinks: false });
+    await rm(join(root, "link"));
+    await symlink(join(dir, "t2"), join(root, "link"), "junction");
+    await until(() => seen.length > 0);
+    await settle();
+    expect(seen).toEqual([["change", join(root, "link")]]);
   });
 });
 

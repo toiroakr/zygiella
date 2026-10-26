@@ -95,13 +95,15 @@ A path that cannot be read because of permissions is not in `missing`; it is emi
 
 ### Options
 
-| Option                   | Default   | Meaning                                                                                                                                               |
-| ------------------------ | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ignoreInitial`          | `false`   | Do not report what already exists when a path is watched.                                                                                             |
-| `depth`                  | unlimited | How many directory levels below a watched directory are descended into. `0` reports the directory's own children (including new subdirectories) only. |
-| `ignored`                | none      | A `RegExp`, a function `(path) => boolean`, a path (it and everything below it), or an array of those. A skipped directory is not descended into.     |
-| `awaitWriteFinish`       | `false`   | `true` or `{ stabilityThreshold, pollInterval }` in ms (defaults 2000 and 100). Holds `add` and `change` back until size and mtime stop changing.     |
-| `ignorePermissionErrors` | `false`   | Skip directories that cannot be read (`EACCES`, `EPERM`) silently. Otherwise each is emitted once as `error`.                                         |
+| Option                   | Default   | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------------ | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ignoreInitial`          | `false`   | Do not report what already exists when a path is watched.                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `depth`                  | unlimited | How many directory levels below a watched directory are descended into. `0` reports the directory's own children (including new subdirectories) only.                                                                                                                                                                                                                                                                                                                  |
+| `ignored`                | none      | A `RegExp`, a function `(path) => boolean`, a path (it and everything below it), or an array of those. A skipped directory is not descended into.                                                                                                                                                                                                                                                                                                                      |
+| `followSymlinks`         | `true`    | Descend into directories that a symbolic link points at. A link to a directory that is already on the way down (for example a link to an ancestor) is reported but not descended into. `false` watches a link as itself: it is reported as `add`, and pointing it somewhere else is reported as `change`.                                                                                                                                                              |
+| `atomic`                 | `true`    | `true` or a number of ms (`true` is 100). An `unlink` is held back for that long, and a file created again at the same path within it is reported as one `change`, as editors that save by deleting and creating the file produce. Also ignores editor temporary files (`.swp`, `.swx`, a trailing `~`, Sublime's `.subl*.tmp`). `false` reports a deleted file's `unlink` without the wait (an `add` is still reported after the usual 50 ms, or `awaitWriteFinish`). |
+| `awaitWriteFinish`       | `false`   | `true` or `{ stabilityThreshold, pollInterval }` in ms (defaults 2000 and 100). Holds `add` and `change` back until size and mtime stop changing.                                                                                                                                                                                                                                                                                                                      |
+| `ignorePermissionErrors` | `false`   | Skip directories that cannot be read (`EACCES`, `EPERM`) silently. Otherwise each is emitted once as `error`.                                                                                                                                                                                                                                                                                                                                                          |
 
 ### Events
 
@@ -135,7 +137,16 @@ A path that cannot be read because of permissions is not in `missing`; it is emi
   compares it with what was seen before. A directory under `ignored`, such as `node_modules`, costs no watches.
   On Linux each watched directory uses one inotify watch, so a very large tree can reach
   `fs.inotify.max_user_watches`.
-- Symbolic links are reported as what they point at, and never descended into.
+- A symbolic link to a directory is reported as `addDir` and descended into, and what is below it is reported under
+  the link's path. The real path of every directory on the way down is remembered, and a link to one of them is
+  reported but not descended into, so a link back to an ancestor does not loop. Pointing a followed link at another
+  directory is reported as `unlinkDir` of the link (after `unlink` for what was below it), then `addDir` and `add` for
+  what is below the new target. With `followSymlinks: false` a link, including one given to `watch()`, is reported as
+  `add` and never descended into.
+- With `atomic`, the `unlink` of a file that disappears by itself waits for the window before it is reported.
+  `unlinkDir` is not held back, and the files below a removed directory are reported at once, before the directory.
+- Nothing above a watched path is watched. A link given to `watch()`, or a link whose target is outside the watched
+  tree, is not noticed when the link is replaced or when its target is deleted and created again.
 - A directory or an entry (including the target of a symbolic link) that cannot be read, watched or inspected
   because of permissions (`EACCES`, `EPERM`) is emitted as `error` once per path, and `ready` still resolves. With `ignorePermissionErrors: true` it is skipped silently. A path that
   disappears while being watched (`ENOENT`, `ENOTDIR`) is skipped silently. Other failures are emitted as
@@ -146,7 +157,7 @@ A path that cannot be read because of permissions is not in `missing`; it is emi
 - No glob patterns. `ignored` strings match a path and everything below it.
 - Paths are always absolute, with the platform's separator (`C:\work\src\a.ts` on Windows). `ignored` receives
   them in that form, so write a RegExp that spans directories with `[\\/]`.
-- No `usePolling`, `cwd`, `atomic`, `followSymlinks`, `alwaysStat`, and no `stats` argument on events.
+- No `usePolling`, `cwd`, `alwaysStat`, and no `stats` argument on events.
 - `change` events are coalesced as described above, so a rapid second write may not produce a second event.
 
 ## License
