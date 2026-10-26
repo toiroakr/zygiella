@@ -325,26 +325,7 @@ export class FSWatcher extends EventEmitter<Events> {
       return;
     }
 
-    if (this.#ignored.byStats?.(root, info)) {
-      this.#remove(
-        root,
-        true,
-        (key) => ![...this.#roots].some((other) => other !== root && within(other, key)),
-        true,
-      );
-      this.#probes.delete(root);
-      if (info.isDirectory()) {
-        this.#kinds.set(root, "dir");
-        // kept so that a change to the directory is noticed and it is seen again once it is not skipped
-        this.#probes.set(root, root);
-        this.#ensureNative(root);
-      } else {
-        this.#kinds.set(root, "file");
-        this.#ensureNative(dirname(root));
-      }
-      if (previousProbe) this.#release(previousProbe);
-      return;
-    }
+    if (!this.#entries.has(root) && this.#ignored.byStats?.(root, info)) return;
     this.#probes.delete(root);
     if (info.isDirectory()) {
       this.#kinds.set(root, "dir");
@@ -417,7 +398,7 @@ export class FSWatcher extends EventEmitter<Events> {
           }
         }
         if (own.isSymbolicLink() || !info.isDirectory()) this.#denied.delete(path);
-        if (this.#ignored.byStats?.(path, info)) return;
+        if (!this.#entries.has(path) && this.#ignored.byStats?.(path, info)) return;
         seen.add(path);
         await this.#visit(
           path,

@@ -149,11 +149,9 @@ default), the link itself with `followSymlinks: false`. A link that points at no
 `followSymlinks`, and the function is not called for it. A function that declares `stats` is also not called for a
 watched path that does not exist yet.
 
-A path that is already being watched and then starts to be skipped because of its `stats` (for example, a size
-limit) is treated as removed: `unlink` (or `unlinkDir` with everything below it) is reported even though the file is
-still there, and nothing more is reported for it, or for a directory's contents, while it is skipped. When it stops
-being skipped it is reported as `add` (with `atomic`, a file that stops being skipped within its delay is reported
-as `change`, like a file deleted and created again).
+`stats` is looked at when a path is first seen, and again on each read while the path is being skipped. A path that is
+already being watched keeps being watched when its `stats` later start to match (for example, a file grows past a
+size limit), and a skipped path is reported as `add` once its `stats` stop matching.
 
 ## Environments without native events
 
