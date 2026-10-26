@@ -46,7 +46,9 @@ await watcher.close();
 1. Change the import from `chokidar` to `zygiella`. `watch(paths, options)` and the `FSWatcher` methods and
    events listed below keep their names and shapes.
 2. Pass files and directories, not glob patterns. Expand a glob first, for example with `fs.glob`.
-3. Expect absolute paths in events and in what `ignored` receives, whatever form you passed in.
+3. Expect absolute paths in events and in what `ignored` receives, whatever form you passed in. A function in
+   `ignored` receives `(path, stats?)`, but unlike chokidar a function that declares `stats` is called once, with it; a `RegExp` is tested against the path with `/` as the
+   separator, also on Windows, so `/(^|\/)\../` (dotfiles) works as written in chokidar's README.
 4. Remove options that do not exist here (see [Differences](#differences-from-chokidar)).
 
 As in chokidar, a path that does not exist is not an error (it is watched once it appears; `ready` resolves to
@@ -99,7 +101,7 @@ A path that cannot be read because of permissions is not in `missing`; it is emi
 | ------------------------ | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ignoreInitial`          | `false`   | Do not report what already exists when a path is watched.                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `depth`                  | unlimited | How many directory levels below a watched directory are descended into. `0` reports the directory's own children (including new subdirectories) only.                                                                                                                                                                                                                                                                                                                  |
-| `ignored`                | none      | A `RegExp`, a function `(path) => boolean`, a path (it and everything below it), or an array of those. A skipped directory is not descended into.                                                                                                                                                                                                                                                                                                                      |
+| `ignored`                | none      | A `RegExp`, a function `(path, stats?) => boolean`, a path (it and everything below it), or an array of those. A skipped directory is not descended into. See [ignored](#ignored).                                                                                                                                                                                                                                                                                     |
 | `followSymlinks`         | `true`    | Descend into directories that a symbolic link points at. A link to a directory that is already on the way down (for example a link to an ancestor) is reported but not descended into. `false` watches a link as itself: it is reported as `add`, and pointing it somewhere else is reported as `change`.                                                                                                                                                              |
 | `atomic`                 | `true`    | `true` or a number of ms (`true` is 100). An `unlink` is held back for that long, and a file created again at the same path within it is reported as one `change`, as editors that save by deleting and creating the file produce. Also ignores editor temporary files (`.swp`, `.swx`, a trailing `~`, Sublime's `.subl*.tmp`). `false` reports a deleted file's `unlink` without the wait (an `add` is still reported after the usual 50 ms, or `awaitWriteFinish`). |
 | `awaitWriteFinish`       | `false`   | `true` or `{ stabilityThreshold, pollInterval }` in ms (defaults 2000 and 100). Holds `add` and `change` back until size and mtime stop changing.                                                                                                                                                                                                                                                                                                                      |
@@ -124,8 +126,59 @@ A path that cannot be read because of permissions is not in `missing`; it is emi
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `add(paths)`     | Start watching more paths. Returns the watcher.                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `unwatch(paths)` | Stop watching paths that were given to `watch()` or `add()`. Returns the watcher.                                                                                                                                                                                                                                                                                                                                                                       |
+| `rescan()`       | Read every watched path again now and report the difference. Returns a promise. See [Environments without native events](#environments-without-native-events).                                                                                                                                                                                                                                                                                          |
 | `close()`        | Stop watching. Takes effect when called: nothing is reported afterwards, even if you do not `await` it. Returns a promise that resolves once work in progress has finished.                                                                                                                                                                                                                                                                             |
 | `ready`          | A promise that resolves to `{ missing }` once the paths last given to `watch()` or `add()` are being watched. `missing` lists the paths of that call that did not exist. `await watcher.add(p).ready` is safe to change `p` right after. A change made between `watch()` and `ready` can be missed, or reported as an initial `add` (with `ignoreInitial: false`) or as a normal event, depending on timing, so await `ready` before changing anything. |
+
+### ignored
+
+A `RegExp` is tested against the absolute path with `/` as the separator, so on Windows `C:\work\.git\config` is
+tested as `C:/work/.git/config`. A function and a string get the path as it is, with the platform's separator.
+
+A function that declares two parameters (its `length` is 2 or more, so a default or rest parameter does not count) is called once per path with the path and its `fs.Stats`. A function that
+declares one parameter or none is called with the path alone, and no `stat` is made for it. A path that a `RegExp`,
+a string or such a function already skips is not `stat`ed either. Declaring `stats` is how to descend into every
+directory and still skip some files, which the path alone cannot tell apart:
+
+```ts
+watch("src", { ignored: (path, stats) => stats?.isFile() === true && !path.endsWith(".js") });
+```
+
+For a symbolic link, `stats` describes what the path is reported as: the target with `followSymlinks` (the
+default), the link itself with `followSymlinks: false`. A link that points at nothing is not reported with
+`followSymlinks`, and the function is not called for it. A function that declares `stats` is also not called for a
+watched path that does not exist yet.
+
+`stats` is looked at when a path is first seen, and again on each read while the path is being skipped. A path that is
+already being watched keeps being watched when its `stats` later start to match (for example, a file grows past a
+size limit), and a skipped path is reported (`add`, or `addDir` for a directory) once its `stats` stop matching.
+
+## Environments without native events
+
+`fs.watch` reports nothing on some file systems: a Docker bind mount, `/mnt/c` in WSL2, NFS and SMB. Node.js's own
+documentation says it is unreliable on network file systems and on the host file systems of Vagrant and Docker, and
+may not work at all. The watcher then stays silent while files change. Options, in the order to try them:
+
+1. Watch on the host and forward the change into the container, for example with `docker compose watch`.
+2. On WSL2, keep the project in the Linux file system (`~/project`) instead of `/mnt/c/...`.
+3. Call `rescan()` yourself. It reads every watched path and every directory descended into right now, and reports
+   the difference with the same events as a native notification. zygiella has no polling of its own, so choose
+   how often:
+
+```ts
+const watcher = watch("src", { ignoreInitial: true });
+watcher.on("error", (error) => console.error(error));
+const timer = setInterval(() => void watcher.rescan(), 2000);
+
+// when you are done
+clearInterval(timer);
+await watcher.close();
+```
+
+`rescan()` resolves once the directories have been read. `add` and `change` are reported after the usual wait
+(50 ms of quiet, or `awaitWriteFinish`), so they can arrive after the promise resolves. A call made while a read is
+running does not report the same change twice, and after `close()` it does nothing. Every call reads the whole
+tree, so keep the interval long for a large one.
 
 ## Behavior
 
@@ -155,9 +208,11 @@ A path that cannot be read because of permissions is not in `missing`; it is emi
 ## Differences from chokidar
 
 - No glob patterns. `ignored` strings match a path and everything below it.
-- Paths are always absolute, with the platform's separator (`C:\work\src\a.ts` on Windows). `ignored` receives
-  them in that form, so write a RegExp that spans directories with `[\\/]`.
-- No `usePolling`, `cwd`, `alwaysStat`, and no `stats` argument on events.
+- Paths are always absolute, with the platform's separator (`C:\work\src\a.ts` on Windows). A function or string
+  in `ignored` receives them in that form; a RegExp is tested against the path with `/` as the separator, as in
+  chokidar. A RegExp written for `\\` only (`/src\\gen/`) no longer matches on Windows; `[\\/]` still does.
+- No `usePolling`, `cwd`, `alwaysStat`, and no `stats` argument on events. `rescan()` is the substitute for
+  polling, called by you.
 - `change` events are coalesced as described above, so a rapid second write may not produce a second event.
 
 ## License

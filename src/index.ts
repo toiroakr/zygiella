@@ -5,14 +5,22 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 
 export type WatchEvent = "add" | "addDir" | "change" | "unlink" | "unlinkDir";
 
-export type Ignored = RegExp | string | ((path: string) => boolean) | readonly Ignored[];
+export type Ignored =
+  | RegExp
+  | string
+  | ((path: string, stats?: Stats) => boolean)
+  | readonly Ignored[];
 
 export interface WatchOptions {
   /** Do not report what already exists when a path is watched. */
   ignoreInitial?: boolean;
   /** How many directory levels below a watched directory are descended into. Default: unlimited. */
   depth?: number;
-  /** Paths to skip. A skipped directory is not descended into. Receives absolute paths. */
+  /**
+   * Paths to skip. A skipped directory is not descended into. Receives absolute paths; a RegExp is tested against
+   * the path with `/` as the separator. A function that declares two parameters (`length` 2 or more) is called once, with the
+   * `fs.Stats` of the path (of the target, for a link); any other function is called with the path alone.
+   */
   ignored?: Ignored;
   /**
    * Descend into directories that a symbolic link points at. A link back to a directory on its own path is
@@ -78,23 +86,47 @@ const DENIED = new Set(["EACCES", "EPERM"]);
 const within = (root: string, path: string): boolean =>
   path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
 
-function matcher(ignored: Ignored | undefined): (path: string) => boolean {
-  if (ignored === undefined) return () => false;
-  if (typeof ignored === "function") return ignored;
-  if (ignored instanceof RegExp) return (path) => ignored.test(path);
+interface Matcher {
+  byPath: (path: string) => boolean;
+  /** Present only when some function asked for stats. */
+  byStats?: (path: string, stats: Stats) => boolean;
+}
+
+const slashed = sep === "/" ? (path: string) => path : (path: string) => path.split(sep).join("/");
+
+function matcher(ignored: Ignored | undefined): Matcher {
+  if (ignored === undefined) return { byPath: () => false };
+  if (typeof ignored === "function")
+    return ignored.length >= 2
+      ? { byPath: () => false, byStats: (path, stats) => ignored(path, stats) }
+      : { byPath: (path) => ignored(path) };
+  if (ignored instanceof RegExp)
+    return {
+      byPath: (path) => {
+        // with the g or y flag, test() resumes from the last match, so a second path would not be tested from its start
+        ignored.lastIndex = 0;
+        return ignored.test(slashed(path));
+      },
+    };
   if (typeof ignored === "string") {
     const target = resolve(ignored);
-    return (path) => within(target, path);
+    return { byPath: (path) => within(target, path) };
   }
   const all = ignored.map(matcher);
-  return (path) => all.some((m) => m(path));
+  const withStats = all.filter((m) => m.byStats);
+  return {
+    byPath: (path) => all.some((m) => m.byPath(path)),
+    byStats: withStats.length
+      ? (path, stats) => withStats.some((m) => m.byStats!(path, stats))
+      : undefined,
+  };
 }
 
 const list = (paths: string | readonly string[]): string[] =>
   (typeof paths === "string" ? [paths] : [...paths]).map((p) => resolve(p));
 
 export class FSWatcher extends EventEmitter<Events> {
-  readonly #ignored: (path: string) => boolean;
+  readonly #ignored: Matcher;
   readonly #atomic: number;
   readonly #ignoreInitial: boolean;
   readonly #depth: number;
@@ -135,7 +167,9 @@ export class FSWatcher extends EventEmitter<Events> {
     this.#atomic = atomic === true ? ATOMIC_MS : atomic || 0;
     const userIgnored = matcher(options.ignored);
     this.#ignored =
-      this.#atomic > 0 ? (path) => EDITOR_TEMP.test(path) || userIgnored(path) : userIgnored;
+      this.#atomic > 0
+        ? { ...userIgnored, byPath: (path) => EDITOR_TEMP.test(path) || userIgnored.byPath(path) }
+        : userIgnored;
     this.#ignoreInitial = options.ignoreInitial ?? false;
     this.#depth = options.depth ?? Infinity;
     this.#followSymlinks = options.followSymlinks ?? true;
@@ -172,6 +206,44 @@ export class FSWatcher extends EventEmitter<Events> {
       if (parent !== path) this.#release(parent);
     }
     return this;
+  }
+
+  /**
+   * Reads every watched root and every directory descended into again, and reports what differs from the last
+   * time. Resolves once that is read; add / change are reported after their usual wait.
+   */
+  async rescan(): Promise<void> {
+    if (this.#closed) return;
+    // a call made while a rescan runs makes it run once more afterwards, so two rescans never read at the same time
+    await this.#serial("rescan", () => this.#rescanOnce());
+  }
+
+  async #rescanOnce(): Promise<void> {
+    await Promise.all(
+      [...this.#roots].map((root) =>
+        this.#serial(`root:${root}`, () => this.#syncRoot(root, "live")),
+      ),
+    );
+    // a read can drop a directory or change what lies below it, so shallow directories go first and each one is
+    // looked up again when its turn comes
+    const levels = new Map<number, string[]>();
+    for (const dir of this.#depthLeft.keys()) {
+      const depth = dir.split(sep).length;
+      const level = levels.get(depth);
+      if (level) level.push(dir);
+      else levels.set(depth, [dir]);
+    }
+    for (const depth of [...levels.keys()].sort((a, b) => a - b)) {
+      await Promise.all(
+        levels.get(depth)!.map((dir) => {
+          const left = this.#depthLeft.get(dir);
+          const ancestry = this.#ancestry.get(dir);
+          return left !== undefined && ancestry && !this.#roots.has(dir)
+            ? this.#serial(`dir:${dir}`, () => this.#syncDir(dir, left, "live", ancestry))
+            : undefined;
+        }),
+      );
+    }
   }
 
   async close(): Promise<void> {
@@ -224,7 +296,7 @@ export class FSWatcher extends EventEmitter<Events> {
 
   async #syncRoot(root: string, mode: Mode): Promise<void> {
     if (this.#closed || !this.#roots.has(root)) return;
-    if (this.#ignored(root)) return;
+    if (this.#ignored.byPath(root)) return;
     const previousProbe = this.#probes.get(root);
     if (mode !== "live") this.#missingAtStart.delete(root);
     let info = await this.#stat(root).catch((error: NodeJS.ErrnoException) => {
@@ -277,6 +349,16 @@ export class FSWatcher extends EventEmitter<Events> {
       return;
     }
 
+    if (!this.#entries.has(root) && this.#ignored.byStats?.(root, info)) {
+      // watched all the same, so that the path is read again when its stats may have changed
+      this.#kinds.set(root, info.isDirectory() ? "dir" : "file");
+      // a directory has no entry to keep its watch while it is skipped, so the probe does, and unwatch() releases it
+      if (info.isDirectory()) this.#probes.set(root, root);
+      else this.#probes.delete(root);
+      this.#ensureNative(info.isDirectory() ? root : dirname(root));
+      if (previousProbe) this.#release(previousProbe);
+      return;
+    }
     this.#probes.delete(root);
     if (info.isDirectory()) {
       this.#kinds.set(root, "dir");
@@ -324,7 +406,7 @@ export class FSWatcher extends EventEmitter<Events> {
     await Promise.all(
       names.map(async (name) => {
         const path = join(dir, name);
-        if (this.#ignored(path)) return;
+        if (this.#ignored.byPath(path)) return;
         const own = await lstat(path).catch((error) => inspectFailed(error, path));
         if (!own) return;
         let info = own;
@@ -349,6 +431,7 @@ export class FSWatcher extends EventEmitter<Events> {
           }
         }
         if (own.isSymbolicLink() || !info.isDirectory()) this.#denied.delete(path);
+        if (!this.#entries.has(path) && this.#ignored.byStats?.(path, info)) return;
         seen.add(path);
         await this.#visit(
           path,
