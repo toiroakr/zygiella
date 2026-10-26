@@ -547,7 +547,7 @@ describe("rescan order", () => {
       const link = join(dir, "sub", "link");
       await symlink(outside, link, "junction");
       const { w, seen } = await start(dir);
-      await removeOnce(link, { recursive: true });
+      await rm(link, { recursive: true });
       await symlink(join(dir, "sub"), link, "junction");
       await w.rescan();
       await settle();

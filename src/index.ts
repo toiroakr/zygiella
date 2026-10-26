@@ -214,6 +214,11 @@ export class FSWatcher extends EventEmitter<Events> {
    */
   async rescan(): Promise<void> {
     if (this.#closed) return;
+    // a call made while a rescan runs makes it run once more afterwards, so two rescans never read at the same time
+    await this.#serial("rescan", () => this.#rescanOnce());
+  }
+
+  async #rescanOnce(): Promise<void> {
     await Promise.all(
       [...this.#roots].map((root) =>
         this.#serial(`root:${root}`, () => this.#syncRoot(root, "live")),
@@ -224,7 +229,9 @@ export class FSWatcher extends EventEmitter<Events> {
     const levels = new Map<number, string[]>();
     for (const dir of this.#depthLeft.keys()) {
       const depth = dir.split(sep).length;
-      levels.set(depth, [...(levels.get(depth) ?? []), dir]);
+      const level = levels.get(depth);
+      if (level) level.push(dir);
+      else levels.set(depth, [dir]);
     }
     for (const depth of [...levels.keys()].sort((a, b) => a - b)) {
       await Promise.all(
