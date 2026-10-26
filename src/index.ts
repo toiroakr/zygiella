@@ -209,9 +209,13 @@ export class FSWatcher extends EventEmitter<Events> {
     if (this.#closed || !this.#roots.has(root)) return;
     if (this.#ignored(root)) return;
     const previousProbe = this.#probes.get(root);
-    const own = this.#followSymlinks ? undefined : await lstat(root).catch(() => undefined);
-    const link = own?.isSymbolicLink() ? await readlink(root).catch(() => undefined) : undefined;
-    const info = link === undefined ? await stat(root).catch(() => undefined) : own;
+    // a second look with stat would follow a link that was put back in between, and report the directory it points at
+    let info = await this.#statRoot(root);
+    let link: string | undefined;
+    if (!this.#followSymlinks && info?.isSymbolicLink()) {
+      link = await readlink(root).catch(() => undefined);
+      if (link === undefined) info = undefined;
+    }
     if (this.#closed || !this.#roots.has(root)) return;
 
     if (!info) {
@@ -242,8 +246,8 @@ export class FSWatcher extends EventEmitter<Events> {
       for (const stale of attached) this.#release(stale);
       // the root may have been created between the stat above and the watch being attached
       if (
-        await stat(root).then(
-          () => true,
+        await this.#statRoot(root).then(
+          (found) => found !== undefined,
           () => false,
         )
       )
@@ -263,6 +267,10 @@ export class FSWatcher extends EventEmitter<Events> {
       await this.#visit(root, info, 0, mode, [], link);
     }
     if (previousProbe) this.#release(previousProbe);
+  }
+
+  #statRoot(root: string): Promise<Stats | undefined> {
+    return (this.#followSymlinks ? stat(root) : lstat(root)).catch(() => undefined);
   }
 
   async #syncDir(
