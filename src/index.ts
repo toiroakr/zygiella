@@ -84,8 +84,15 @@ export class FSWatcher extends EventEmitter<Events> {
   readonly #settling = new Map<string, Settling>();
   #closed = false;
 
-  /** Resolves when the initial paths are being watched, at the same time as `ready` is emitted. */
-  readonly ready: Promise<void>;
+  #ready: Promise<void>;
+
+  /**
+   * Resolves once the paths last given to `watch()` or `add()` are being watched, so a change made right after it
+   * is reported. The `ready` event is emitted for the paths given to `watch()` only.
+   */
+  get ready(): Promise<void> {
+    return this.#ready;
+  }
 
   constructor(paths: string | readonly string[], options: WatchOptions = {}) {
     super();
@@ -99,16 +106,13 @@ export class FSWatcher extends EventEmitter<Events> {
           pollInterval: (typeof awf === "object" && awf.pollInterval) || 100,
         }
       : undefined;
-    this.ready = this.#start(list(paths), this.#ignoreInitial ? "quiet" : "initial")
-      // fs.watch returns before the OS starts delivering (FSEvents on macOS): a change made in that gap is never reported
-      .then(() => new Promise<void>((done) => setTimeout(done, READY_SETTLE_MS)))
-      .then(() => {
-        if (!this.#closed) this.emit("ready");
-      });
+    this.#ready = this.#watch(list(paths)).then(() => {
+      if (!this.#closed) this.emit("ready");
+    });
   }
 
   add(paths: string | readonly string[]): this {
-    void this.#start(list(paths), this.#ignoreInitial ? "quiet" : "initial");
+    this.#ready = this.#watch(list(paths));
     return this;
   }
 
@@ -133,6 +137,12 @@ export class FSWatcher extends EventEmitter<Events> {
     for (const watcher of this.#native.values()) watcher.close();
     this.#native.clear();
     await Promise.all([...this.#queues.values()].map((q) => q.done));
+  }
+
+  async #watch(roots: string[]): Promise<void> {
+    await this.#start(roots, this.#ignoreInitial ? "quiet" : "initial");
+    // fs.watch returns before the OS starts delivering (FSEvents on macOS): a change made in that gap is never reported
+    await new Promise<void>((done) => setTimeout(done, READY_SETTLE_MS));
   }
 
   #start(roots: string[], mode: Mode): Promise<void> {

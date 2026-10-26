@@ -291,6 +291,26 @@ describe("add / unwatch / close", () => {
     }
   });
 
+  test("ready after add settles once the added path is watched, so a change made right after it is reported", async () => {
+    const { w } = await start(dir);
+    const initial = w.ready;
+    for (let i = 0; i < 15; i++) {
+      const other = await realpath(await mkdtemp(join(tmpdir(), "zygiella-added-")));
+      try {
+        const reported: string[] = [];
+        w.on("add", (path) => reported.push(path));
+        await w.add(other).ready;
+        expect(w.ready).not.toBe(initial);
+        await writeFile(join(other, "x.txt"), "1");
+        await until(() => reported.includes(join(other, "x.txt")));
+        w.unwatch(other);
+        w.removeAllListeners("add");
+      } finally {
+        await rm(other, { recursive: true, force: true });
+      }
+    }
+  });
+
   test("close stops reporting, and a pending awaitWriteFinish is dropped", async () => {
     const { w, seen } = await start(dir, {
       awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 25 },
