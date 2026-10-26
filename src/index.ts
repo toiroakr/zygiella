@@ -617,6 +617,8 @@ export class FSWatcher extends EventEmitter<Events> {
     }
     if (!previous) {
       if (next.dir) this.#flushUnlink(path);
+      // an unlink listener may have closed the watcher: the entry would be in the baseline without being reported
+      if (this.#closed) return;
       this.#setEntry(path, next);
       if (next.dir) {
         if (mode !== "quiet") this.#dispatch("addDir", path);
@@ -685,7 +687,8 @@ export class FSWatcher extends EventEmitter<Events> {
       // an add that never settled was never reported, so there is nothing to take back
       if (!report || job?.event === "add") continue;
       if (entry.dir) this.#dispatch("unlinkDir", key);
-      else if (defer && this.#atomic > 0 && key === path) this.#holdUnlink(key, entry);
+      else if (defer && this.#atomic > 0 && key === path)
+        this.#holdUnlink(key, job?.before ?? entry);
       else this.#dispatch("unlink", key);
     }
   }

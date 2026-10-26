@@ -9,6 +9,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
+import { mkdirSync, rmSync as removeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -1542,6 +1543,34 @@ describe("snapshot", () => {
     expect(saved(w).entries.map((e) => e.path)).toContain(join(dir, "a.txt"));
     const { seen } = await start(dir, { since: snapshot });
     expect(seen).toEqual([["unlink", join(dir, "a.txt")]]);
+  });
+
+  test("a file deleted while its change is still waiting keeps the last reported state in the snapshot", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { w } = await start(dir, {
+      atomic: 2000,
+      awaitWriteFinish: { stabilityThreshold: 5000, pollInterval: 20 },
+    });
+    await writeFile(join(dir, "a.txt"), "22");
+    await w.rescan();
+    await rm(join(dir, "a.txt"));
+    await w.rescan();
+    expect(w.snapshot().entries.find((e) => e.path === join(dir, "a.txt"))?.size).toBe(1);
+  });
+
+  test("a replacement that is read after close() is called from an unlink listener is not in the snapshot", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { w } = await start(dir);
+    let unlinked = false;
+    w.on("unlink", () => {
+      unlinked = true;
+      void w.close();
+    });
+    removeSync(join(dir, "a.txt"));
+    mkdirSync(join(dir, "a.txt"));
+    await until(() => unlinked);
+    await w.close();
+    expect(w.snapshot().entries.map((e) => e.path)).not.toContain(join(dir, "a.txt"));
   });
 
   test("a directory is in the snapshot as a directory with the file entries around it", async () => {

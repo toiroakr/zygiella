@@ -67,8 +67,9 @@ The whole library is `src/index.ts`; the tests are `test/watch.test.ts` and run 
   that was last reported, and a held unlink in `#unlinks` keeps its entry; `snapshot()` (and `close()`, which restores
   them) records those, so a change or unlink that was never reported is reported by the next run. A path whose `add`
   is still waiting is left out. Seeding keeps an entry only if its parent was kept, so no entry sits below one that is
-  missing, and a scan that is still reading when `close()` is called adds nothing to the baseline (`#visit` and the
-  removal in `#syncDir` return once closed).
+  missing, and a scan that is still reading when `close()` is called adds nothing to the baseline (`#visit` returns once
+  closed, also after an `unlink` listener closed it, and so does the removal in `#syncDir`). A held unlink keeps
+  `job.before` when the file had a change waiting.
 - With `atomic`, the unlink of a file is held back in `#unlinks` for the window, and an `add` announced for the same
   path in that time becomes a `change`. A removed directory reports what is below it at once, flushing held unlinks
   first. `atomic` also adds the editor temporary file patterns to `ignored`.
