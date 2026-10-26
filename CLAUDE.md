@@ -57,6 +57,13 @@ The whole library is `src/index.ts`; the tests are `test/watch.test.ts` and run 
   set up again is kept in `#unwatched` (public: `unwatched`) and reported as `error`. It is still read once, so what exists at that moment
   is reported; later changes are missed. `rescan()` reaches `#ensureNative` for every directory, so it is also what watches it again;
   there is no timer, because retrying on an interval is the caller's `setInterval`, as with `rescan()` itself.
+- `snapshot()` serializes `#entries` (absolute paths, `{ version: 1, entries }`); `since` seeds `#entries` and
+  `#children` in the constructor, before the first scan, for the roots given to `watch()` only. Entries outside the
+  roots, ignored by path, or below an ignored directory are dropped. The ordinary scan in `initial` mode then does the
+  diff, and `since` (even `null` or an unusable one) forces `initial`, so it overrides `ignoreInitial`. `initial` mode
+  reports `change` and `unlink` at once, as it does `add`, because they must come before `ready`. `snapshot()` leaves
+  out paths in `#settling`, and `close()` drops their entries, so a path that was never reported is reported by the
+  next run.
 - With `atomic`, the unlink of a file is held back in `#unlinks` for the window, and an `add` announced for the same
   path in that time becomes a `change`. A removed directory reports what is below it at once, flushing held unlinks
   first. `atomic` also adds the editor temporary file patterns to `ignored`.
