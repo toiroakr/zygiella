@@ -219,14 +219,24 @@ export class FSWatcher extends EventEmitter<Events> {
         this.#serial(`root:${root}`, () => this.#syncRoot(root, "live")),
       ),
     );
-    await Promise.all(
-      [...this.#depthLeft].map(([dir, left]) => {
-        const ancestry = this.#ancestry.get(dir);
-        return ancestry && !this.#roots.has(dir)
-          ? this.#serial(`dir:${dir}`, () => this.#syncDir(dir, left, "live", ancestry))
-          : undefined;
-      }),
-    );
+    // a read can drop a directory or change what lies below it, so shallow directories go first and each one is
+    // looked up again when its turn comes
+    const levels = new Map<number, string[]>();
+    for (const dir of this.#depthLeft.keys()) {
+      const depth = dir.split(sep).length;
+      levels.set(depth, [...(levels.get(depth) ?? []), dir]);
+    }
+    for (const depth of [...levels.keys()].sort((a, b) => a - b)) {
+      await Promise.all(
+        levels.get(depth)!.map((dir) => {
+          const left = this.#depthLeft.get(dir);
+          const ancestry = this.#ancestry.get(dir);
+          return left !== undefined && ancestry && !this.#roots.has(dir)
+            ? this.#serial(`dir:${dir}`, () => this.#syncDir(dir, left, "live", ancestry))
+            : undefined;
+        }),
+      );
+    }
   }
 
   async close(): Promise<void> {

@@ -538,6 +538,28 @@ describe("ignored", () => {
   });
 });
 
+describe("rescan order", () => {
+  test("a link that is pointed at its own ancestor is not descended into by the read of the directory below it", async () => {
+    const outside = await realpath(await mkdtemp(join(tmpdir(), "zygiella-outside-")));
+    try {
+      await writeFile(join(outside, "x.txt"), "1");
+      await mkdir(join(dir, "sub"));
+      const link = join(dir, "sub", "link");
+      await symlink(outside, link, "junction");
+      const { w, seen } = await start(dir);
+      await removeOnce(link, { recursive: true });
+      await symlink(join(dir, "sub"), link, "junction");
+      await w.rescan();
+      await settle();
+      expect(
+        seen.map(([, path]) => path).filter((path) => path.includes(join("link", "link"))),
+      ).toEqual([]);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("ignored receives stats", () => {
   test("a RegExp is matched against a path with / as the separator", async () => {
     await mkdir(join(dir, ".git"));
