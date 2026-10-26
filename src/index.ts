@@ -153,6 +153,7 @@ export class FSWatcher extends EventEmitter<Events> {
   readonly #settling = new Map<string, Settling>();
   readonly #unlinks = new Map<string, NodeJS.Timeout>();
   readonly #denied = new Set<string>();
+  readonly #unwatched = new Set<string>();
   readonly #missingAtStart = new Set<string>();
   #closed = false;
 
@@ -165,6 +166,15 @@ export class FSWatcher extends EventEmitter<Events> {
    */
   get ready(): Promise<ReadyResult> {
     return this.#ready;
+  }
+
+  /**
+   * Directories that are read but have no native watch, because `fs.watch` threw (`ENOSPC`, `EMFILE`) or the
+   * watcher reported an error. Changes below them are missed until `rescan()` reads them, and it also tries to
+   * watch them again.
+   */
+  get unwatched(): readonly string[] {
+    return [...this.#unwatched].sort();
   }
 
   constructor(paths: string | readonly string[], options: WatchOptions = {}) {
@@ -209,6 +219,8 @@ export class FSWatcher extends EventEmitter<Events> {
       this.#probes.delete(path);
       this.#remove(path, false, (key) => ![...this.#roots].some((root) => within(root, key)));
       if (probe) this.#release(probe);
+      // a directory whose watch failed has no entry, so #remove never released it
+      for (const key of this.#unwatched) if (within(path, key)) this.#release(key);
       const parent = dirname(path);
       if (parent !== path) this.#release(parent);
     }
@@ -261,6 +273,7 @@ export class FSWatcher extends EventEmitter<Events> {
     this.#unlinks.clear();
     for (const watcher of this.#native.values()) watcher.close();
     this.#native.clear();
+    this.#unwatched.clear();
     await Promise.all([...this.#queues.values()].map((q) => q.done));
   }
 
@@ -312,6 +325,7 @@ export class FSWatcher extends EventEmitter<Events> {
     if (this.#closed || !this.#roots.has(root)) return;
     if (this.#ignored.byPath(root)) return;
     const previousProbe = this.#probes.get(root);
+    const previousParent = this.#kinds.get(root) === "file" ? dirname(root) : undefined;
     if (mode !== "live") this.#missingAtStart.delete(root);
     let info = await this.#stat(root).catch((error: NodeJS.ErrnoException) => {
       this.#fail(error, root);
@@ -352,6 +366,7 @@ export class FSWatcher extends EventEmitter<Events> {
       if (previousProbe) attached.add(previousProbe);
       attached.delete(ancestor);
       for (const stale of attached) this.#release(stale);
+      if (previousParent) this.#release(previousParent);
       // the root may have been created between the stat above and the watch being attached
       if (
         await this.#stat(root).then(
@@ -371,6 +386,7 @@ export class FSWatcher extends EventEmitter<Events> {
       else this.#probes.delete(root);
       this.#ensureNative(info.isDirectory() ? root : dirname(root));
       if (previousProbe) this.#release(previousProbe);
+      if (previousParent) this.#release(previousParent);
       return;
     }
     this.#probes.delete(root);
@@ -386,6 +402,7 @@ export class FSWatcher extends EventEmitter<Events> {
       await this.#visit(root, info, 0, mode, [], link);
     }
     if (previousProbe) this.#release(previousProbe);
+    if (previousParent) this.#release(previousParent);
   }
 
   #stat(path: string): Promise<Stats> {
@@ -634,13 +651,20 @@ export class FSWatcher extends EventEmitter<Events> {
         // the directory itself went away; its parent's or the root's own sync reports it
         this.#native.delete(dir);
         watcher.close();
+        this.#unwatch(dir, error);
         this.#onNative(dir);
-        this.#fail(error, dir);
       });
       this.#native.set(dir, watcher);
+      this.#unwatched.delete(dir);
     } catch (error) {
-      this.#fail(error as NodeJS.ErrnoException, dir);
+      this.#unwatch(dir, error as NodeJS.ErrnoException);
     }
+  }
+
+  /** A directory that vanished is not listed: whoever removed it is reported by its parent's sync, which releases it. */
+  #unwatch(dir: string, error: NodeJS.ErrnoException): void {
+    if (!VANISHED.has(error.code ?? "")) this.#unwatched.add(dir);
+    this.#fail(error, dir);
   }
 
   /** A path that vanished is a race with whoever removed it. A permission error is reported once per path until the path reads again. */
@@ -660,6 +684,7 @@ export class FSWatcher extends EventEmitter<Events> {
       [...this.#probes.values()].includes(dir) ||
       [...this.#roots].some((root) => this.#kinds.get(root) === "file" && dirname(root) === dir);
     if (needed) return;
+    this.#unwatched.delete(dir);
     this.#native.get(dir)?.close();
     this.#native.delete(dir);
   }

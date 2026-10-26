@@ -128,6 +128,7 @@ A path that cannot be read because of permissions is not in `missing`; it is emi
 | `add(paths)`     | Start watching more paths. Returns the watcher.                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `unwatch(paths)` | Stop watching paths that were given to `watch()` or `add()`. Returns the watcher.                                                                                                                                                                                                                                                                                                                                                                       |
 | `rescan()`       | Read every watched path again now and report the difference. Returns a promise. See [Environments without native events](#environments-without-native-events).                                                                                                                                                                                                                                                                                          |
+| `unwatched`      | The directories that are read but have no native watch, as a sorted array of absolute paths: `fs.watch` threw (`ENOSPC`, `EMFILE`) or reported an error, and watching again failed. Changes below them are missed. Empty when every watch is established. See [Behavior](#behavior).                                                                                                                                                                    |
 | `close()`        | Stop watching. Takes effect when called: nothing is reported afterwards, even if you do not `await` it. Returns a promise that resolves once work in progress has finished.                                                                                                                                                                                                                                                                             |
 | `ready`          | A promise that resolves to `{ missing }` once the paths last given to `watch()` or `add()` are being watched. `missing` lists the paths of that call that did not exist. `await watcher.add(p).ready` is safe to change `p` right after. A change made between `watch()` and `ready` can be missed, or reported as an initial `add` (with `ignoreInitial: false`) or as a normal event, depending on timing, so await `ready` before changing anything. |
 
@@ -176,6 +177,7 @@ clearInterval(timer);
 await watcher.close();
 ```
 
+`rescan()` also tries again to watch a directory that is in `watcher.unwatched` (see [Behavior](#behavior)).
 `rescan()` resolves once the directories have been read. `add` and `change` are reported after the usual wait
 (50 ms of quiet, or `awaitWriteFinish`), so they can arrive after the promise resolves. A call made while a read is
 running does not report the same change twice, and after `close()` it does nothing. Every call reads the whole
@@ -199,6 +201,15 @@ tree, so keep the interval long for a large one.
   `add` and never descended into.
 - With `atomic`, the `unlink` of a file that disappears by itself waits for the window before it is reported.
   `unlinkDir` is not held back, and the files below a removed directory are reported at once, before the directory.
+- When `fs.watch` cannot be set up for a directory (`ENOSPC`, `EMFILE`: the limits on inotify watches or open
+  files), the failure is emitted as `error` and `ready` still resolves. The directory is still read, so it is
+  reported once (with `ignoreInitial: false`, as `addDir` and `add` for what is below it), but later changes under it
+  are not noticed, and the directory is listed in `watcher.unwatched`. The same goes for a native watcher that
+  reports an error and cannot be set up again. zygiella does not retry by itself: `rescan()` reads the directory
+  again, reports what changed, and tries to watch it again, after which it leaves `unwatched`. If it still fails,
+  `error` is emitted again (except a permission error, which follows the rules below). Raise the limit (on Linux, `fs.inotify.max_user_watches` and
+  `fs.inotify.max_user_instances`; `ulimit -n` for open files), or call `rescan()` on a timer as described in
+  [Environments without native events](#environments-without-native-events).
 - Nothing above a watched path is watched. A link given to `watch()`, or a link whose target is outside the watched
   tree, is not noticed when the link is replaced or when its target is deleted and created again.
 - A directory or an entry (including the target of a symbolic link) that cannot be read, watched or inspected

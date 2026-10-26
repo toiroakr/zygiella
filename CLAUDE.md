@@ -11,6 +11,13 @@ chokidar API that most tools use: `watch(paths, options)`, the `FSWatcher` event
 not add the rest of chokidar's surface (globs, polling, `cwd`, `stats`); being small is the point. `rescan()` is not polling: it runs only when the user calls
 it, so an interval is the user's to write.
 
+## Planning
+
+Before choosing a design for any change to how zygiella watches, reports, recovers or fails, run the
+`survey-watchers` skill (`.claude/skills/survey-watchers/SKILL.md`): check in their source how chokidar, notify,
+fsnotify and the other well-known watchers solve the same problem, and write that into the plan and the PR body.
+Do it first, not after the design is settled.
+
 ## Common Development Commands
 
 This repository uses **pnpm** (pinned via the `packageManager` field). Do not use npm or yarn.
@@ -46,6 +53,10 @@ The whole library is `src/index.ts`; the tests are `test/watch.test.ts` and run 
   directories from the root down to each directory, and a link whose real path is already there is reported but not
   descended into, because a link back to an ancestor would loop forever. With `followSymlinks: false` a link is an
   entry of its own, compared by its `lstat` data and `readlink` target.
+- A directory whose `fs.watch` threw (`ENOSPC`, `EMFILE`) or whose native watcher reported an error and could not be
+  set up again is kept in `#unwatched` (public: `unwatched`) and reported as `error`. It is still read once, so what exists at that moment
+  is reported; later changes are missed. `rescan()` reaches `#ensureNative` for every directory, so it is also what watches it again;
+  there is no timer, because retrying on an interval is the caller's `setInterval`, as with `rescan()` itself.
 - With `atomic`, the unlink of a file is held back in `#unlinks` for the window, and an `add` announced for the same
   path in that time becomes a `change`. A removed directory reports what is below it at once, flushing held unlinks
   first. `atomic` also adds the editor temporary file patterns to `ignored`.
