@@ -62,7 +62,8 @@ The whole library is `src/index.ts`; the tests are `test/watch.test.ts` and run 
   roots, deeper than `depth`, ignored by path, or below an ignored directory are dropped. The ordinary scan then does
   the diff in the `seed` mode, which `since` (even `null` or an unusable one) selects, so it overrides `ignoreInitial`.
   `seed` is `initial` that also reports `change` and `unlink` at once, because they must come before `ready`; `add()`
-  keeps `initial`, with its quiet period and `atomic` hold. A `Settling` job for a change keeps `before`, the entry
+  keeps its own mode (`quiet` with `ignoreInitial`, else `initial`), where a `change` is still announced after the quiet
+  period (or `awaitWriteFinish`) and an `unlink` is still held for `atomic`. A `Settling` job for a change keeps `before`, the entry
   that was last reported, and a held unlink in `#unlinks` keeps its entry; `snapshot()` (and `close()`, which restores
   them) records those, so a change or unlink that was never reported is reported by the next run. A path whose `add`
   is still waiting is left out. Seeding keeps an entry only if its parent was kept, so no entry sits below one that is

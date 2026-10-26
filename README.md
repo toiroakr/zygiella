@@ -196,7 +196,9 @@ import { readFile, writeFile } from "node:fs/promises";
 import { watch } from "zygiella";
 
 const file = ".cache/watch-snapshot.json";
-const since = await readFile(file, "utf8").then(JSON.parse, () => null); // null: first run
+const since = await readFile(file, "utf8")
+  .then(JSON.parse)
+  .catch(() => null); // null: first run, or a file that cannot be read
 
 const watcher = watch("src", { since });
 // before `ready`: add / change / unlink / addDir / unlinkDir for what differs from the snapshot
@@ -209,7 +211,7 @@ await watcher.close();
 ```
 
 - A path is reported as `add` when it is not in the snapshot, `unlink` when it is in the snapshot and gone, and
-  `change` when its size, mtime or inode differs, the same test as a live `change`. Directories are `addDir` and
+  `change` when its size, mtime, inode or symbolic link target differs, the same test as a live `change`. Directories are `addDir` and
   `unlinkDir`; what was below a removed directory is reported as `unlink` first.
 - `since` replaces the initial report: `ignoreInitial` has no effect on it, so `ignoreInitial: true` with a snapshot
   still reports the difference. Without a usable snapshot, everything is reported as `add` (`addDir` for directories),
