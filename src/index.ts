@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { watch as nativeWatch, type FSWatcher as NativeWatcher, type Stats } from "node:fs";
-import { lstat, readdir, stat } from "node:fs/promises";
+import { lstat, readdir, readlink, realpath, stat } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 
 export type WatchEvent = "add" | "addDir" | "change" | "unlink" | "unlinkDir";
@@ -14,6 +14,19 @@ export interface WatchOptions {
   depth?: number;
   /** Paths to skip. A skipped directory is not descended into. Receives absolute paths. */
   ignored?: Ignored;
+  /**
+   * Descend into directories that a symbolic link points at. A link back to a directory on its own path is
+   * reported but not descended into. When false, a link is watched as itself and pointing it elsewhere is
+   * reported as `change`. Default: true.
+   */
+  followSymlinks?: boolean;
+  /**
+   * Hold an unlink back for this many ms (`true`: 100). A file created again at the same path within that time is
+   * reported as one `change` instead of unlink and add, which is how editors that save by deleting and creating the
+   * file look. Also skips the temporary files editors leave (`.swp`, `.swx`, a trailing `~`, Sublime's `.subl*.tmp`).
+   * Default: true.
+   */
+  atomic?: boolean | number;
   /** Hold add / change back until the file's size and mtime have been stable for `stabilityThreshold` ms. */
   awaitWriteFinish?: boolean | { stabilityThreshold?: number; pollInterval?: number };
 }
@@ -34,6 +47,8 @@ interface Entry {
   mtimeMs: number;
   size: number;
   ino: number;
+  /** Where a link points: its target when watched as itself, the real path of the directory when followed. */
+  link?: string;
 }
 
 interface Settling {
@@ -43,6 +58,8 @@ interface Settling {
 
 const QUIET_MS = 50;
 const READY_SETTLE_MS = 50;
+const ATOMIC_MS = 100;
+const EDITOR_TEMP = /\..*\.(sw[px])$|~$|\.subl.*\.tmp/;
 
 /** quiet: remember only. initial: report at once (it is what `ready` waits for). live: report once the burst of events is over. */
 type Mode = "quiet" | "initial" | "live";
@@ -69,8 +86,10 @@ const list = (paths: string | readonly string[]): string[] =>
 
 export class FSWatcher extends EventEmitter<Events> {
   readonly #ignored: (path: string) => boolean;
+  readonly #atomic: number;
   readonly #ignoreInitial: boolean;
   readonly #depth: number;
+  readonly #followSymlinks: boolean;
   readonly #settle: { stabilityThreshold: number; pollInterval: number } | undefined;
 
   readonly #roots = new Set<string>();
@@ -79,9 +98,12 @@ export class FSWatcher extends EventEmitter<Events> {
   readonly #entries = new Map<string, Entry>();
   readonly #children = new Map<string, Set<string>>();
   readonly #depthLeft = new Map<string, number>();
+  /** Real paths of the directories from the watched root down to each directory, the directory's own last. */
+  readonly #ancestry = new Map<string, readonly string[]>();
   readonly #native = new Map<string, NativeWatcher>();
   readonly #queues = new Map<string, { dirty: boolean; done: Promise<void> }>();
   readonly #settling = new Map<string, Settling>();
+  readonly #unlinks = new Map<string, NodeJS.Timeout>();
   #closed = false;
 
   #ready: Promise<void>;
@@ -96,9 +118,14 @@ export class FSWatcher extends EventEmitter<Events> {
 
   constructor(paths: string | readonly string[], options: WatchOptions = {}) {
     super();
-    this.#ignored = matcher(options.ignored);
+    const atomic = options.atomic ?? true;
+    this.#atomic = atomic === true ? ATOMIC_MS : atomic || 0;
+    const userIgnored = matcher(options.ignored);
+    this.#ignored =
+      this.#atomic > 0 ? (path) => EDITOR_TEMP.test(path) || userIgnored(path) : userIgnored;
     this.#ignoreInitial = options.ignoreInitial ?? false;
     this.#depth = options.depth ?? Infinity;
+    this.#followSymlinks = options.followSymlinks ?? true;
     const awf = options.awaitWriteFinish;
     this.#settle = awf
       ? {
@@ -134,6 +161,8 @@ export class FSWatcher extends EventEmitter<Events> {
     this.#closed = true;
     for (const job of this.#settling.values()) clearTimeout(job.timer);
     this.#settling.clear();
+    for (const timer of this.#unlinks.values()) clearTimeout(timer);
+    this.#unlinks.clear();
     for (const watcher of this.#native.values()) watcher.close();
     this.#native.clear();
     await Promise.all([...this.#queues.values()].map((q) => q.done));
@@ -180,11 +209,13 @@ export class FSWatcher extends EventEmitter<Events> {
     if (this.#closed || !this.#roots.has(root)) return;
     if (this.#ignored(root)) return;
     const previousProbe = this.#probes.get(root);
-    const info = await stat(root).catch(() => undefined);
+    const own = this.#followSymlinks ? undefined : await lstat(root).catch(() => undefined);
+    const link = own?.isSymbolicLink() ? await readlink(root).catch(() => undefined) : undefined;
+    const info = link === undefined ? await stat(root).catch(() => undefined) : own;
     if (this.#closed || !this.#roots.has(root)) return;
 
     if (!info) {
-      this.#remove(root, true);
+      this.#remove(root, true, undefined, true);
       this.#kinds.set(root, "missing");
       const nearest = async (): Promise<string> => {
         let ancestor = dirname(root);
@@ -225,19 +256,25 @@ export class FSWatcher extends EventEmitter<Events> {
       this.#kinds.set(root, "dir");
       this.#ensureNative(root);
       await this.#visit(root, info, 0, mode);
-      await this.#syncDir(root, this.#depth, mode);
+      await this.#syncDir(root, this.#depth, mode, [await realpath(root).catch(() => root)]);
     } else {
       this.#kinds.set(root, "file");
       this.#ensureNative(dirname(root));
-      await this.#visit(root, info, 0, mode);
+      await this.#visit(root, info, 0, mode, [], link);
     }
     if (previousProbe) this.#release(previousProbe);
   }
 
-  async #syncDir(dir: string, left: number, mode: Mode): Promise<void> {
+  async #syncDir(
+    dir: string,
+    left: number,
+    mode: Mode,
+    ancestry: readonly string[],
+  ): Promise<void> {
     if (this.#closed || ![...this.#roots].some((root) => within(root, dir))) return;
     // attach the watcher before reading, so nothing that changes during the scan is lost
     this.#depthLeft.set(dir, left);
+    this.#ancestry.set(dir, ancestry);
     this.#ensureNative(dir);
     const names = await readdir(dir).catch(() => undefined);
     if (!names || this.#closed) return;
@@ -249,45 +286,73 @@ export class FSWatcher extends EventEmitter<Events> {
         if (this.#ignored(path)) return;
         const own = await lstat(path).catch(() => undefined);
         if (!own) return;
-        // a link is reported as what it points at, but never descended into: a link back to an ancestor would loop forever
-        const link = own.isSymbolicLink();
-        const info = link ? await stat(path).catch(() => undefined) : own;
-        if (!info) return;
+        let info = own;
+        let real = join(ancestry.at(-1)!, name);
+        let link: string | undefined;
+        let descend = left;
+        if (own.isSymbolicLink()) {
+          if (this.#followSymlinks) {
+            const target = await stat(path).catch(() => undefined);
+            if (!target) return;
+            info = target;
+            if (target.isDirectory()) {
+              const resolved = await realpath(path).catch(() => undefined);
+              if (!resolved) return;
+              real = resolved;
+              link = resolved;
+              // a link to a directory already on the way down would loop forever
+              if (ancestry.includes(real)) descend = 0;
+            }
+          } else {
+            link = await readlink(path).catch(() => undefined);
+            if (link === undefined) return;
+          }
+        }
         seen.add(path);
-        await this.#visit(path, info, link ? 0 : left, mode);
+        await this.#visit(path, info, descend, mode, [...ancestry, real], link);
       }),
     );
     for (const path of this.#children.get(dir) ?? []) {
-      if (!seen.has(path) && !this.#roots.has(path)) this.#remove(path, true);
+      if (!seen.has(path) && !this.#roots.has(path)) this.#remove(path, true, undefined, true);
     }
   }
 
-  async #visit(path: string, info: Stats, left: number, mode: Mode): Promise<void> {
+  async #visit(
+    path: string,
+    info: Stats,
+    left: number,
+    mode: Mode,
+    ancestry: readonly string[] = [],
+    link?: string,
+  ): Promise<void> {
     const next: Entry = {
       dir: info.isDirectory(),
       mtimeMs: info.mtimeMs,
       size: info.size,
       ino: info.ino,
+      link,
     };
     let previous = this.#entries.get(path);
-    if (previous && previous.dir !== next.dir) {
+    if (previous && (previous.dir !== next.dir || (next.dir && previous.link !== next.link))) {
       this.#remove(path, true);
       previous = undefined;
     }
     if (!previous) {
+      if (next.dir) this.#flushUnlink(path);
       this.#setEntry(path, next);
       if (mode !== "quiet") {
         if (next.dir || mode === "initial") this.#dispatch(next.dir ? "addDir" : "add", path);
         else this.#announce("add", path);
       }
-      if (next.dir && left > 0) await this.#syncDir(path, left - 1, mode);
+      if (next.dir && left > 0) await this.#syncDir(path, left - 1, mode, ancestry);
       return;
     }
     if (
       !next.dir &&
       (previous.mtimeMs !== next.mtimeMs ||
         previous.size !== next.size ||
-        previous.ino !== next.ino)
+        previous.ino !== next.ino ||
+        previous.link !== next.link)
     ) {
       this.#setEntry(path, next);
       if (mode !== "quiet") this.#announce("change", path);
@@ -302,8 +367,23 @@ export class FSWatcher extends EventEmitter<Events> {
     siblings.add(path);
   }
 
-  /** Forgets `path` and everything below it, deepest first, optionally reporting each as unlink / unlinkDir. */
-  #remove(path: string, report: boolean, only: (key: string) => boolean = () => true): void {
+  /**
+   * Forgets `path` and everything below it, deepest first, optionally reporting each as unlink / unlinkDir.
+   * With `defer`, the unlink of `path` itself is held back for the `atomic` window if it is a file.
+   */
+  #remove(
+    path: string,
+    report: boolean,
+    only: (key: string) => boolean = () => true,
+    defer = false,
+  ): void {
+    for (const [key, timer] of this.#unlinks) {
+      if (!within(path, key) || !only(key) || (report && key === path)) continue;
+      clearTimeout(timer);
+      this.#unlinks.delete(key);
+      // what is below a directory that goes away is reported before the directory is
+      if (report) this.#dispatch("unlink", key);
+    }
     const keys = [...this.#entries.keys()].filter((key) => within(path, key) && only(key));
     keys.sort((a, b) => b.length - a.length);
     for (const key of keys) {
@@ -316,10 +396,14 @@ export class FSWatcher extends EventEmitter<Events> {
       this.#children.delete(key);
       if (entry.dir) {
         this.#depthLeft.delete(key);
+        this.#ancestry.delete(key);
         this.#release(key);
       }
       // an add that never settled was never reported, so there is nothing to take back
-      if (report && job?.event !== "add") this.#dispatch(entry.dir ? "unlinkDir" : "unlink", key);
+      if (!report || job?.event === "add") continue;
+      if (entry.dir) this.#dispatch("unlinkDir", key);
+      else if (defer && this.#atomic > 0 && key === path) this.#holdUnlink(key);
+      else this.#dispatch("unlink", key);
     }
   }
 
@@ -330,7 +414,29 @@ export class FSWatcher extends EventEmitter<Events> {
     this.emit("all", event, path);
   }
 
+  #flushUnlink(path: string): void {
+    const held = this.#unlinks.get(path);
+    if (!held) return;
+    clearTimeout(held);
+    this.#unlinks.delete(path);
+    this.#dispatch("unlink", path);
+  }
+
+  #holdUnlink(path: string): void {
+    const timer = setTimeout(() => {
+      this.#unlinks.delete(path);
+      this.#dispatch("unlink", path);
+    }, this.#atomic);
+    this.#unlinks.set(path, timer);
+  }
+
   #announce(event: "add" | "change", path: string): void {
+    const held = this.#unlinks.get(path);
+    if (held) {
+      clearTimeout(held);
+      this.#unlinks.delete(path);
+      event = "change";
+    }
     const settle = this.#settle;
     const prior = this.#settling.get(path);
     clearTimeout(prior?.timer);
@@ -408,8 +514,9 @@ export class FSWatcher extends EventEmitter<Events> {
       if (affected) void this.#serial(`root:${root}`, () => this.#syncRoot(root, "live"));
     }
     const left = this.#depthLeft.get(dir);
-    if (left !== undefined && !this.#roots.has(dir))
-      void this.#serial(`dir:${dir}`, () => this.#syncDir(dir, left, "live"));
+    const ancestry = this.#ancestry.get(dir);
+    if (left !== undefined && ancestry && !this.#roots.has(dir))
+      void this.#serial(`dir:${dir}`, () => this.#syncDir(dir, left, "live", ancestry));
   }
 }
 

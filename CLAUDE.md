@@ -7,8 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `zygiella` is a dependency-free file watcher for Node.js built on `fs.watch`. It implements the subset of the
 chokidar API that most tools use: `watch(paths, options)`, the `FSWatcher` events (`add`, `addDir`, `change`,
 `unlink`, `unlinkDir`, `all`, `ready`, `error`) and methods (`add`, `unwatch`, `close`), and the options
-`ignored`, `ignoreInitial`, `depth` and `awaitWriteFinish`. Do not add the rest of chokidar's surface (globs,
-polling, `cwd`, `stats`); being small is the point.
+`ignored`, `ignoreInitial`, `depth`, `followSymlinks`, `atomic` and `awaitWriteFinish`. Do not add the rest of
+chokidar's surface (globs, polling, `cwd`, `stats`); being small is the point.
 
 ## Common Development Commands
 
@@ -41,7 +41,13 @@ The whole library is `src/index.ts`; the tests are `test/watch.test.ts` and run 
   write. With `awaitWriteFinish` they wait for a stable size and mtime instead.
 - `ready` waits 50 ms after the watchers are attached, because `fs.watch` returns before FSEvents on macOS
   delivers. A test that makes a change right after `ready` covers this; do not shorten the wait without it.
-- Symbolic links are reported but not descended into, because a link back to an ancestor would loop forever.
+- A link to a directory is descended into unless `followSymlinks` is false. `#ancestry` keeps the real paths of the
+  directories from the root down to each directory, and a link whose real path is already there is reported but not
+  descended into, because a link back to an ancestor would loop forever. With `followSymlinks: false` a link is an
+  entry of its own, compared by its `lstat` data and `readlink` target.
+- With `atomic`, the unlink of a file is held back in `#unlinks` for the window, and an `add` announced for the same
+  path in that time becomes a `change`. A removed directory reports what is below it at once, flushing held unlinks
+  first. `atomic` also adds the editor temporary file patterns to `ignored`.
 
 ## Testing
 
