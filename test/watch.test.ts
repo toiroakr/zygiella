@@ -538,6 +538,161 @@ describe("ignored", () => {
   });
 });
 
+describe("ignored receives stats", () => {
+  test("a RegExp is matched against a path with / as the separator", async () => {
+    await mkdir(join(dir, ".git"));
+    const { seen } = await start(dir, { ignored: /(^|\/)\../ });
+    await writeFile(join(dir, ".git", "config"), "1");
+    await writeFile(join(dir, "a.txt"), "1");
+    await until(() => seen.length > 0);
+    await settle();
+    expect(seen).toEqual([["add", join(dir, "a.txt")]]);
+  });
+
+  test("a function given stats can skip files of one kind while directories are still descended into", async () => {
+    await mkdir(join(dir, "sub"));
+    await writeFile(join(dir, "sub", "a.js"), "1");
+    await writeFile(join(dir, "sub", "b.txt"), "1");
+    await writeFile(join(dir, "c.txt"), "1");
+    const { seen } = await start(dir, {
+      ignoreInitial: false,
+      ignored: (path, stats) => stats?.isFile() === true && !path.endsWith(".js"),
+    });
+    expect(seen).toEqual(
+      expect.arrayContaining([
+        ["addDir", join(dir, "sub")],
+        ["add", join(dir, "sub", "a.js")],
+      ]),
+    );
+    expect(seen.map(([, path]) => path)).not.toContain(join(dir, "c.txt"));
+    expect(seen.map(([, path]) => path)).not.toContain(join(dir, "sub", "b.txt"));
+  });
+
+  test("a function that takes one argument is called with the path alone, a function that takes two is called once with stats", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    await settle(500);
+    const one: Array<string> = [];
+    const two: Array<[string, boolean]> = [];
+    await start(dir, { ignoreInitial: false, ignored: (path) => (one.push(path), false) });
+    await start(dir, {
+      ignoreInitial: false,
+      ignored: (path, stats) => (two.push([path, stats !== undefined]), false),
+    });
+    const file = join(dir, "a.txt");
+    expect(one.filter((p) => p === file)).toHaveLength(1);
+    expect(two.filter(([p]) => p === file)).toEqual([[file, true]]);
+  });
+
+  test("an array calls a function that takes two arguments only when no other entry has matched", async () => {
+    await writeFile(join(dir, "a.log"), "1");
+    await writeFile(join(dir, "a.txt"), "1");
+    await settle(500);
+    const two: Array<[string, boolean]> = [];
+    const { seen } = await start(dir, {
+      ignoreInitial: false,
+      ignored: [/\.log$/, (path, stats) => (two.push([path, stats !== undefined]), false)],
+    });
+    expect(seen).toContainEqual(["add", join(dir, "a.txt")]);
+    expect(seen.map(([, path]) => path)).not.toContain(join(dir, "a.log"));
+    expect(two.filter(([path]) => path !== dir)).toEqual([[join(dir, "a.txt"), true]]);
+  });
+
+  test("a link is given the stats of what it points at", async () => {
+    await mkdir(join(dir, "sub"));
+    const link = join(dir, "link");
+    await symlink(join(dir, "sub"), link, "junction");
+    await settle(500);
+    const given: Array<[boolean, boolean]> = [];
+    await start(dir, {
+      ignoreInitial: false,
+      ignored: (path, stats) => {
+        if (path === link && stats) given.push([stats.isDirectory(), stats.isSymbolicLink()]);
+        return false;
+      },
+    });
+    expect(given).toEqual([[true, false]]);
+  });
+});
+
+describe("rescan", () => {
+  test("reports a file created, changed and removed without waiting for a native event", async () => {
+    await writeFile(join(dir, "b.txt"), "1");
+    await writeFile(join(dir, "c.txt"), "1");
+    const { w, seen } = await start(dir);
+    await writeFile(join(dir, "a.txt"), "1");
+    await writeFile(join(dir, "b.txt"), "22");
+    await rm(join(dir, "c.txt"));
+    await w.rescan();
+    await until(() => seen.length >= 3);
+    await settle();
+    expect(seen).toHaveLength(3);
+    expect(seen).toEqual(
+      expect.arrayContaining([
+        ["add", join(dir, "a.txt")],
+        ["change", join(dir, "b.txt")],
+        ["unlink", join(dir, "c.txt")],
+      ]),
+    );
+  });
+
+  test("reports nothing when nothing has changed", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { w, seen } = await start(dir);
+    await w.rescan();
+    await settle();
+    expect(seen).toEqual([]);
+  });
+
+  test("reads directories below the watched one again", async () => {
+    await mkdir(join(dir, "sub", "deep"), { recursive: true });
+    const { w, seen } = await start(dir);
+    await writeFile(join(dir, "sub", "deep", "a.txt"), "1");
+    await w.rescan();
+    await until(() => seen.length > 0);
+    await settle();
+    expect(seen).toEqual([["add", join(dir, "sub", "deep", "a.txt")]]);
+  });
+
+  test("reports a file that appears at a watched path that did not exist", async () => {
+    const file = join(dir, "a.txt");
+    const { w, seen } = await start(file);
+    await writeFile(file, "1");
+    await w.rescan();
+    await until(() => seen.length > 0);
+    expect(seen).toEqual([["add", file]]);
+  });
+
+  test("respects depth and ignored", async () => {
+    await mkdir(join(dir, "sub"));
+    const { w, seen } = await start(dir, { depth: 0, ignored: /\.log$/ });
+    await writeFile(join(dir, "sub", "a.txt"), "1");
+    await writeFile(join(dir, "a.log"), "1");
+    await writeFile(join(dir, "b.txt"), "1");
+    await w.rescan();
+    await until(() => seen.length > 0);
+    await settle();
+    expect(seen).toEqual([["add", join(dir, "b.txt")]]);
+  });
+
+  test("calls made while a read is running do not report the same change twice", async () => {
+    const { w, seen } = await start(dir);
+    await writeFile(join(dir, "a.txt"), "1");
+    await Promise.all([w.rescan(), w.rescan(), w.rescan()]);
+    await until(() => seen.length > 0);
+    await settle();
+    expect(seen).toEqual([["add", join(dir, "a.txt")]]);
+  });
+
+  test("resolves without reporting after close", async () => {
+    const { w, seen } = await start(dir);
+    await w.close();
+    await writeFile(join(dir, "a.txt"), "1");
+    await w.rescan();
+    await settle();
+    expect(seen).toEqual([]);
+  });
+});
+
 describe("awaitWriteFinish", () => {
   test("a write in several steps is reported once, after the file stops growing", async () => {
     const { seen } = await start(dir, {
