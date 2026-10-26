@@ -276,12 +276,21 @@ export class FSWatcher extends EventEmitter<Events> {
       names.map(async (name) => {
         const path = join(dir, name);
         if (this.#ignored(path)) return;
-        const own = await lstat(path).catch(() => undefined);
+        const own = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+          this.#fail(error, path);
+          return undefined;
+        });
         if (!own) return;
         // a link is reported as what it points at, but never descended into: a link back to an ancestor would loop forever
         const link = own.isSymbolicLink();
-        const info = link ? await stat(path).catch(() => undefined) : own;
+        const info = link
+          ? await stat(path).catch((error: NodeJS.ErrnoException) => {
+              this.#fail(error, path);
+              return undefined;
+            })
+          : own;
         if (!info) return;
+        this.#denied.delete(path);
         seen.add(path);
         await this.#visit(path, info, link ? 0 : left, mode);
       }),
@@ -341,6 +350,7 @@ export class FSWatcher extends EventEmitter<Events> {
       clearTimeout(job?.timer);
       this.#settling.delete(key);
       this.#entries.delete(key);
+      this.#denied.delete(key);
       this.#children.get(dirname(key))?.delete(key);
       this.#children.delete(key);
       if (entry.dir) {

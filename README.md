@@ -73,7 +73,7 @@ the list of such paths, see [`watch()`](#watchpaths-options)), and a directory t
   ```
 
 - A directory that cannot be read (`EACCES`, `EPERM`) is emitted as `error`; `ignorePermissionErrors: true`
-  silences it. Without an `error` listener that throws.
+  silences it. Without an `error` listener, an `EventEmitter` throws on `error`.
 - Node.js 22.18 or later is required.
 
 ## API
@@ -137,8 +137,8 @@ A path that cannot be read because of permissions is not in `missing`; it is emi
   On Linux each watched directory uses one inotify watch, so a very large tree can reach
   `fs.inotify.max_user_watches`.
 - Symbolic links are reported as what they point at, and never descended into.
-- A directory that cannot be read or watched because of permissions (`EACCES`, `EPERM`) is emitted as `error`
-  once, and `ready` still resolves. With `ignorePermissionErrors: true` it is skipped silently. A path that
+- A directory or an entry (including the target of a symbolic link) that cannot be read, watched or inspected
+  because of permissions (`EACCES`, `EPERM`) is emitted as `error` once per path, and `ready` still resolves. With `ignorePermissionErrors: true` it is skipped silently. A path that
   disappears while being watched (`ENOENT`, `ENOTDIR`) is skipped silently. Other failures are emitted as
   `error`; without an `error` listener that throws, as with any `EventEmitter`.
 

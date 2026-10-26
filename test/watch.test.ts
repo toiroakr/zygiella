@@ -395,6 +395,13 @@ describe("missing paths", () => {
     await expect(w.add(present).ready).resolves.toEqual({ missing: [] });
   });
 
+  test("a missing path is returned again when it is unwatched and added", async () => {
+    const missing = join(dir, "again");
+    const { w } = await start(missing);
+    w.unwatch(missing);
+    await expect(w.add(missing).ready).resolves.toEqual({ missing: [missing] });
+  });
+
   test("a path added while missing is watched once it appears", async () => {
     const { w, seen } = await start(dir);
     const missing = join(dir, "added-later");
@@ -428,6 +435,7 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
 
     afterEach(async () => {
       await chmod(join(dir, "locked"), 0o755).catch(() => undefined);
+      await chmod(join(dir, "root"), 0o755).catch(() => undefined);
       await chmod(join(dir, "root", "locked"), 0o755).catch(() => undefined);
     });
 
@@ -471,6 +479,61 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
       await writeFile(join(root, "b.txt"), "1");
       await settle();
       expect(errors).toHaveLength(1);
+    });
+
+    test("an unreadable directory that is removed and created again is reported again", async () => {
+      const root = join(dir, "root");
+      await mkdir(join(root, "locked"), { recursive: true });
+      await chmod(join(root, "locked"), 0o000);
+      const { w, errors } = await startCollecting(root);
+      let removed = false;
+      w.on("unlinkDir", () => (removed = true));
+      await until(() => errors.length === 1);
+      await rm(join(root, "locked"), { recursive: true });
+      await until(() => removed);
+      await mkdir(join(root, "locked"));
+      await chmod(join(root, "locked"), 0o000);
+      await until(() => errors.length === 2);
+    });
+
+    test("an unreadable directory is reported again after unwatch and add", async () => {
+      const locked = await lockedDir(0o000);
+      const { w, errors } = await startCollecting(locked);
+      w.unwatch(locked);
+      await w.add(locked).ready;
+      expect(errors).toHaveLength(2);
+    });
+
+    test("an entry that cannot be inspected inside a listable directory is reported once", async () => {
+      const root = join(dir, "root");
+      await mkdir(root);
+      await writeFile(join(root, "a.txt"), "1");
+      await chmod(root, 0o400);
+      const { errors } = await startCollecting(root);
+      await settle();
+      expect(errors.map((e) => e.code)).toEqual(["EACCES"]);
+    });
+
+    test("a symbolic link whose target cannot be reached is reported once", async () => {
+      const root = join(dir, "root");
+      const locked = join(dir, "locked");
+      await mkdir(root);
+      await mkdir(locked);
+      await symlink(join(locked, "target"), join(root, "link"));
+      await chmod(locked, 0o000);
+      const { errors } = await startCollecting(root);
+      await settle();
+      expect(errors.map((e) => e.code)).toEqual(["EACCES"]);
+    });
+
+    test("ignorePermissionErrors skips entries that cannot be inspected silently", async () => {
+      const root = join(dir, "root");
+      await mkdir(root);
+      await writeFile(join(root, "a.txt"), "1");
+      await chmod(root, 0o400);
+      const { errors } = await startCollecting(root, { ignorePermissionErrors: true });
+      await settle();
+      expect(errors).toEqual([]);
     });
 
     test("ignorePermissionErrors skips unreadable directories silently", async () => {
