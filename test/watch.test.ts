@@ -8,8 +8,10 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import { spawn, type ChildProcess } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { watch, type FSWatcher } from "../src/index.ts";
 
@@ -1179,3 +1181,65 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     });
   },
 );
+
+describe("persistent", () => {
+  const entry = pathToFileURL(join(import.meta.dirname, "../src/index.ts")).href;
+
+  const children: ChildProcess[] = [];
+  afterEach(() => {
+    for (const proc of children) proc.kill();
+  });
+
+  function child(body: string) {
+    const proc = spawn(
+      process.execPath,
+      ["--input-type=module", "-e", `import { watch } from ${JSON.stringify(entry)};\n${body}`],
+      { stdio: ["ignore", "pipe", "inherit"] },
+    );
+    children.push(proc);
+    let out = "";
+    proc.stdout.on("data", (chunk) => (out += chunk));
+    const exited = new Promise<number | null>((r) => proc.once("close", (code) => r(code)));
+    return { proc, exited, output: () => out };
+  }
+
+  const watched = (options: string) => `
+    const w = watch(${JSON.stringify(dir)}, ${options});
+    await w.ready;
+    console.log("ready");
+  `;
+
+  test("persistent: false lets the process exit with the watcher left open", async () => {
+    const { proc, exited } = child(watched("{ persistent: false }"));
+    const timer = setTimeout(() => proc.kill(), 5000);
+    expect(await exited).toBe(0);
+    clearTimeout(timer);
+  });
+
+  test("a watcher keeps the process alive by default", async () => {
+    const { proc, exited, output } = child(watched("{}"));
+    await until(() => output().includes("ready"), 5000);
+    let done = false;
+    void exited.then(() => (done = true));
+    await settle(500);
+    expect(done).toBe(false);
+    proc.kill();
+    await exited;
+  });
+
+  test("persistent: false still reports a change while something else keeps the process alive", async () => {
+    const { proc, exited, output } = child(`
+      const w = watch(${JSON.stringify(dir)}, { persistent: false, ignoreInitial: true, awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 20 } });
+      const alive = setInterval(() => {}, 1000);
+      w.on("add", (path) => { console.log("add", path); clearInterval(alive); });
+      await w.ready;
+      console.log("ready");
+    `);
+    const timer = setTimeout(() => proc.kill(), 8000);
+    await until(() => output().includes("ready"), 5000);
+    await writeFile(join(dir, "a.txt"), "1");
+    expect(await exited).toBe(0);
+    clearTimeout(timer);
+    expect(output()).toContain(`add ${join(dir, "a.txt")}`);
+  });
+});

@@ -36,6 +36,11 @@ export interface WatchOptions {
    * With false nothing is held back, and an add is still reported after the usual quiet period. Default: true.
    */
   atomic?: boolean | number;
+  /**
+   * With false, the watcher does not keep the process alive: the native watch handles and the internal timers are
+   * unref'd, so a process that has nothing else to do exits without `close()`. Default: true.
+   */
+  persistent?: boolean;
   /** Skip EACCES and EPERM silently instead of emitting `error`. Default: false. */
   ignorePermissionErrors?: boolean;
   /** Hold add / change back until the file's size and mtime have been stable for `stabilityThreshold` ms. */
@@ -132,6 +137,7 @@ export class FSWatcher extends EventEmitter<Events> {
   readonly #depth: number;
   readonly #followSymlinks: boolean;
   readonly #ignorePermissionErrors: boolean;
+  readonly #persistent: boolean;
   readonly #settle: { stabilityThreshold: number; pollInterval: number } | undefined;
 
   readonly #roots = new Set<string>();
@@ -174,6 +180,7 @@ export class FSWatcher extends EventEmitter<Events> {
     this.#depth = options.depth ?? Infinity;
     this.#followSymlinks = options.followSymlinks ?? true;
     this.#ignorePermissionErrors = options.ignorePermissionErrors ?? false;
+    this.#persistent = options.persistent ?? true;
     const awf = options.awaitWriteFinish;
     this.#settle = awf
       ? {
@@ -257,9 +264,16 @@ export class FSWatcher extends EventEmitter<Events> {
     await Promise.all([...this.#queues.values()].map((q) => q.done));
   }
 
+  #timeout(fn: () => void, ms: number): NodeJS.Timeout {
+    const timer = setTimeout(fn, ms);
+    if (!this.#persistent) timer.unref();
+    return timer;
+  }
+
   async #watch(roots: string[]): Promise<ReadyResult> {
     await this.#start(roots, this.#ignoreInitial ? "quiet" : "initial");
     const missing = [...new Set(roots)].filter((root) => this.#missingAtStart.has(root));
+    // not unref'd: a caller awaiting `ready` would otherwise see the process exit before it resolves (exit code 13)
     // fs.watch returns before the OS starts delivering (FSEvents on macOS): a change made in that gap is never reported
     await new Promise<void>((done) => setTimeout(done, READY_SETTLE_MS));
     return { missing };
@@ -568,7 +582,7 @@ export class FSWatcher extends EventEmitter<Events> {
   }
 
   #holdUnlink(path: string): void {
-    const timer = setTimeout(() => {
+    const timer = this.#timeout(() => {
       this.#unlinks.delete(path);
       this.#dispatch("unlink", path);
     }, this.#atomic);
@@ -584,7 +598,7 @@ export class FSWatcher extends EventEmitter<Events> {
     this.#settling.set(path, job);
     if (!settle) {
       // Linux reports a write as truncate then write, and a new file as create then write: one report for the burst
-      job.timer = setTimeout(() => {
+      job.timer = this.#timeout(() => {
         this.#settling.delete(path);
         this.#dispatch(job.event, path);
       }, QUIET_MS);
@@ -606,15 +620,15 @@ export class FSWatcher extends EventEmitter<Events> {
         this.#dispatch(job.event, path);
         return;
       }
-      job.timer = setTimeout(poll, settle.pollInterval);
+      job.timer = this.#timeout(poll, settle.pollInterval);
     };
-    job.timer = setTimeout(poll, settle.pollInterval);
+    job.timer = this.#timeout(poll, settle.pollInterval);
   }
 
   #ensureNative(dir: string): void {
     if (this.#closed || this.#native.has(dir)) return;
     try {
-      const watcher = nativeWatch(dir);
+      const watcher = nativeWatch(dir, { persistent: this.#persistent });
       watcher.on("change", () => this.#onNative(dir));
       watcher.on("error", (error) => {
         // the directory itself went away; its parent's or the root's own sync reports it
