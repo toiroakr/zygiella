@@ -1446,6 +1446,46 @@ describe("snapshot", () => {
     expect(w.snapshot().entries.map((e) => e.path)).toEqual([dir]);
   });
 
+  test("a change still waiting to be reported keeps the state before it, so the next start reports change", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { w } = await start(dir, {
+      awaitWriteFinish: { stabilityThreshold: 600, pollInterval: 20 },
+    });
+    await writeFile(join(dir, "a.txt"), "22");
+    await settle(300);
+    const entry = (snapshot: Snapshot) =>
+      snapshot.entries.find((e) => e.path === join(dir, "a.txt"));
+    expect(entry(w.snapshot())?.size).toBe(1);
+    await w.close();
+    const snapshot = saved(w);
+    expect(entry(snapshot)?.size).toBe(1);
+    const { seen } = await start(dir, { since: snapshot });
+    expect(seen).toEqual([["change", join(dir, "a.txt")]]);
+  });
+
+  test("entries deeper than depth are dropped, not reported as unlink", async () => {
+    await mkdir(join(dir, "sub", "deep"), { recursive: true });
+    await writeFile(join(dir, "sub", "a.txt"), "1");
+    await writeFile(join(dir, "sub", "deep", "b.txt"), "1");
+    const snapshot = await stopped(dir);
+    const { w, seen } = await start(dir, { since: snapshot, depth: 0 });
+    await settle();
+    expect(seen).toEqual([]);
+    expect(w.snapshot().entries.map((e) => e.path)).toEqual([dir, join(dir, "sub")]);
+  });
+
+  test("add() on a running watcher still waits for awaitWriteFinish before reporting a change", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { w, seen } = await start(dir, {
+      ignoreInitial: false,
+      awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 20 },
+    });
+    await writeFile(join(dir, "a.txt"), "22");
+    await w.add(dir).ready;
+    expect(seen.filter(([e]) => e === "change")).toEqual([]);
+    await until(() => seen.some(([e]) => e === "change"), 5000);
+  });
+
   test("a directory is in the snapshot as a directory with the file entries around it", async () => {
     await mkdir(join(dir, "sub"));
     await writeFile(join(dir, "sub", "a.txt"), "12");

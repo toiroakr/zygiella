@@ -59,11 +59,12 @@ The whole library is `src/index.ts`; the tests are `test/watch.test.ts` and run 
   there is no timer, because retrying on an interval is the caller's `setInterval`, as with `rescan()` itself.
 - `snapshot()` serializes `#entries` (absolute paths, `{ version: 1, entries }`); `since` seeds `#entries` and
   `#children` in the constructor, before the first scan, for the roots given to `watch()` only. Entries outside the
-  roots, ignored by path, or below an ignored directory are dropped. The ordinary scan in `initial` mode then does the
-  diff, and `since` (even `null` or an unusable one) forces `initial`, so it overrides `ignoreInitial`. `initial` mode
-  reports `change` and `unlink` at once, as it does `add`, because they must come before `ready`. `snapshot()` leaves
-  out paths in `#settling`, and `close()` drops their entries, so a path that was never reported is reported by the
-  next run.
+  roots, deeper than `depth`, ignored by path, or below an ignored directory are dropped. The ordinary scan then does
+  the diff in the `seed` mode, which `since` (even `null` or an unusable one) selects, so it overrides `ignoreInitial`.
+  `seed` is `initial` that also reports `change` and `unlink` at once, because they must come before `ready`; `add()`
+  keeps `initial`, with its quiet period and `atomic` hold. A `Settling` job for a change keeps `before`, the entry
+  that was last reported, and `snapshot()` (and `close()`, which restores it) records that; a path whose `add` is
+  still waiting is left out, so the next run reports it.
 - With `atomic`, the unlink of a file is held back in `#unlinks` for the window, and an `add` announced for the same
   path in that time becomes a `change`. A removed directory reports what is below it at once, flushing held unlinks
   first. `atomic` also adds the editor temporary file patterns to `ignored`.

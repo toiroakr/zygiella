@@ -220,7 +220,7 @@ await watcher.close();
   paths. An entry outside the paths you now watch is ignored, not reported as `unlink`.
 - Pass the same `ignored`, `depth` and `followSymlinks` as when it was taken. A path that `ignored` skips now
   (by its path, or because a directory above it is skipped) is left out of the comparison, so it is not reported as
-  `unlink`. Lowering `depth`, or turning `followSymlinks` off, makes the paths that are no longer reached count as
+  `unlink`; so is a path deeper than `depth` now. Turning `followSymlinks` off makes what was below a link count as
   removed.
 - Take it once the watcher is quiet. A path still waiting to be reported (the 50 ms quiet period, or
   `awaitWriteFinish`) is left out, so the next start reports it as `add`, also when `snapshot()` is called after

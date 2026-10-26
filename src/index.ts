@@ -98,6 +98,8 @@ interface Entry {
 
 interface Settling {
   event: "add" | "change";
+  /** What was reported last, for a change that is still waiting: that is what `snapshot()` records. */
+  before?: Entry;
   timer?: NodeJS.Timeout;
 }
 
@@ -107,8 +109,11 @@ const READY_SETTLE_MS = 50;
 const ATOMIC_MS = 100;
 const EDITOR_TEMP = /\..*\.(sw[px])$|~$|\.subl.*\.tmp/;
 
-/** quiet: remember only. initial: report at once (it is what `ready` waits for). live: report once the burst of events is over. */
-type Mode = "quiet" | "initial" | "live";
+/**
+ * quiet: remember only. initial: report at once (it is what `ready` waits for). seed: initial against a snapshot, so
+ * `change` and `unlink` come at once too. live: report once the burst of events is over.
+ */
+type Mode = "quiet" | "initial" | "seed" | "live";
 
 const VANISHED = new Set(["ENOENT", "ENOTDIR"]);
 const DENIED = new Set(["EACCES", "EPERM"]);
@@ -252,8 +257,10 @@ export class FSWatcher extends EventEmitter<Events> {
    */
   snapshot(): Snapshot {
     const entries: SnapshotEntry[] = [];
-    for (const [path, { dir, mtimeMs, size, ino, link }] of this.#entries) {
-      if (this.#settling.has(path)) continue;
+    for (const [path, current] of this.#entries) {
+      const job = this.#settling.get(path);
+      if (job && !job.before) continue;
+      const { dir, mtimeMs, size, ino, link } = job?.before ?? current;
       entries.push(
         link === undefined
           ? { path, dir, mtimeMs, size, ino }
@@ -268,7 +275,14 @@ export class FSWatcher extends EventEmitter<Events> {
   #seed(since: Snapshot | null | undefined, roots: string[]): void {
     if (!since || since.version !== SNAPSHOT_VERSION || !Array.isArray(since.entries)) return;
     for (const entry of since.entries) {
-      if (!isSnapshotEntry(entry) || !roots.some((root) => within(root, entry.path))) continue;
+      if (!isSnapshotEntry(entry)) continue;
+      const root = roots
+        .filter((r) => within(r, entry.path))
+        .sort((a, b) => b.length - a.length)[0];
+      if (root === undefined) continue;
+      // below the levels that are descended into now, so it is not scanned and would be reported as unlink
+      if (entry.path.slice(root.length).split(sep).filter(Boolean).length > this.#depth + 1)
+        continue;
       // an ignored path, or one below an ignored directory, is not scanned: it would be reported as unlink
       let skipped = false;
       for (let path = entry.path; !skipped; path = dirname(path)) {
@@ -347,7 +361,8 @@ export class FSWatcher extends EventEmitter<Events> {
     // what was never reported is not what the snapshot should say the watcher saw
     for (const [path, job] of this.#settling) {
       clearTimeout(job.timer);
-      this.#entries.delete(path);
+      if (job.before) this.#entries.set(path, job.before);
+      else this.#entries.delete(path);
     }
     this.#settling.clear();
     for (const timer of this.#unlinks.values()) clearTimeout(timer);
@@ -365,7 +380,7 @@ export class FSWatcher extends EventEmitter<Events> {
   }
 
   async #watch(roots: string[], since = false): Promise<ReadyResult> {
-    await this.#start(roots, since || !this.#ignoreInitial ? "initial" : "quiet");
+    await this.#start(roots, since ? "seed" : this.#ignoreInitial ? "quiet" : "initial");
     const missing = [...new Set(roots)].filter((root) => this.#missingAtStart.has(root));
     // not unref'd: a caller awaiting `ready` would otherwise see the process exit before it resolves (exit code 13)
     // fs.watch returns before the OS starts delivering (FSEvents on macOS): a change made in that gap is never reported
@@ -422,7 +437,7 @@ export class FSWatcher extends EventEmitter<Events> {
     if (info && !info.isDirectory()) this.#denied.delete(root);
 
     if (!info) {
-      this.#remove(root, true, undefined, mode === "live");
+      this.#remove(root, true, undefined, mode !== "seed");
       this.#kinds.set(root, "missing");
       const nearest = async (): Promise<string> => {
         let ancestor = dirname(root);
@@ -557,7 +572,7 @@ export class FSWatcher extends EventEmitter<Events> {
     );
     for (const path of this.#children.get(dir) ?? []) {
       if (!seen.has(path) && !uninspectable.has(path) && !this.#roots.has(path))
-        this.#remove(path, true, undefined, mode === "live");
+        this.#remove(path, true, undefined, mode !== "seed");
     }
     const listed = new Set(names);
     for (const path of this.#denied) {
@@ -591,7 +606,7 @@ export class FSWatcher extends EventEmitter<Events> {
       if (next.dir) {
         if (mode !== "quiet") this.#dispatch("addDir", path);
       } else if (mode === "live" || this.#unlinks.has(path)) this.#announce("add", path);
-      else if (mode === "initial") this.#dispatch("add", path);
+      else if (mode !== "quiet") this.#dispatch("add", path);
       if (next.dir && left > 0) await this.#syncDir(path, left - 1, mode, ancestry);
       return;
     }
@@ -606,8 +621,8 @@ export class FSWatcher extends EventEmitter<Events> {
         previous.link !== next.link)
     ) {
       this.#setEntry(path, next);
-      if (mode === "initial") this.#dispatch("change", path);
-      else if (mode === "live") this.#announce("change", path);
+      if (mode === "seed") this.#dispatch("change", path);
+      else if (mode !== "quiet") this.#announce("change", path, previous);
     }
   }
 
@@ -691,12 +706,15 @@ export class FSWatcher extends EventEmitter<Events> {
     this.#unlinks.set(path, timer);
   }
 
-  #announce(event: "add" | "change", path: string): void {
+  #announce(event: "add" | "change", path: string, before?: Entry): void {
     if (this.#takeHeld(path)) event = "change";
     const settle = this.#settle;
     const prior = this.#settling.get(path);
     clearTimeout(prior?.timer);
-    const job: Settling = { event: prior?.event === "add" ? "add" : event };
+    const job: Settling = {
+      event: prior?.event === "add" ? "add" : event,
+      before: prior ? prior.before : before,
+    };
     this.#settling.set(path, job);
     if (!settle) {
       // Linux reports a write as truncate then write, and a new file as create then write: one report for the burst
