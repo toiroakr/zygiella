@@ -151,7 +151,7 @@ watched path that does not exist yet.
 
 `stats` is looked at when a path is first seen, and again on each read while the path is being skipped. A path that is
 already being watched keeps being watched when its `stats` later start to match (for example, a file grows past a
-size limit), and a skipped path is reported as `add` once its `stats` stop matching.
+size limit), and a skipped path is reported (`add`, or `addDir` for a directory) once its `stats` stop matching.
 
 ## Environments without native events
 
