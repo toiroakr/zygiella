@@ -129,6 +129,16 @@ describe("atomic", () => {
     expect(seen).toEqual([["unlink", join(dir, "a.txt")]]);
   });
 
+  test("with the default window an unlink is reported once 100 ms have passed", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { seen } = await start(dir);
+    const deleted = Date.now();
+    await rm(join(dir, "a.txt"));
+    await until(() => seen.length > 0);
+    expect(Date.now() - deleted).toBeGreaterThanOrEqual(90);
+    expect(seen).toEqual([["unlink", join(dir, "a.txt")]]);
+  });
+
   test("a file created again after the unlink was reported is reported as add", async () => {
     await writeFile(join(dir, "a.txt"), "1");
     const { seen } = await start(dir, { atomic: 50 });
@@ -140,6 +150,17 @@ describe("atomic", () => {
       ["unlink", join(dir, "a.txt")],
       ["add", join(dir, "a.txt")],
     ]);
+  });
+
+  test("a file that add() finds again while its unlink is held back is reported as change, not add and unlink", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { w, seen } = await start(dir, { atomic: 300 });
+    await rm(join(dir, "a.txt"));
+    await settle(100);
+    await writeFile(join(dir, "a.txt"), "22");
+    await w.add(dir).ready;
+    await settle(600);
+    expect(seen).toEqual([["change", join(dir, "a.txt")]]);
   });
 
   test("atomic false reports unlink and add as they happen", async () => {
@@ -408,6 +429,29 @@ describe("symbolic links", () => {
       ["change", join(dir, "link")],
     ]);
   });
+
+  test("a followed link that is also given as a watched path is not reported as removed and added again", async () => {
+    const root = join(dir, "root");
+    await mkdir(root);
+    await mkdir(join(dir, "target"));
+    await symlink(join(dir, "target"), join(root, "link"), "junction");
+    const { seen } = await start([root, join(root, "link")]);
+    await settle();
+    expect(seen).toEqual([]);
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "with followSymlinks false and awaitWriteFinish a link whose target is missing is still reported",
+    async () => {
+      const { seen } = await start(dir, {
+        followSymlinks: false,
+        awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 25 },
+      });
+      await symlink(join(dir, "missing"), join(dir, "link"));
+      await until(() => seen.length > 0);
+      expect(seen).toEqual([["add", join(dir, "link")]]);
+    },
+  );
 
   test("with followSymlinks false a link is watched as itself: reported as add and not descended into", async () => {
     const root = join(dir, "root");

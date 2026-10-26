@@ -21,10 +21,11 @@ export interface WatchOptions {
    */
   followSymlinks?: boolean;
   /**
-   * Hold an unlink back for this many ms (`true`: 100). A file created again at the same path within that time is
-   * reported as one `change` instead of unlink and add, which is how editors that save by deleting and creating the
-   * file look. Also skips the temporary files editors leave (`.swp`, `.swx`, a trailing `~`, Sublime's `.subl*.tmp`).
-   * Default: true.
+   * Hold the unlink of a file that is deleted by itself back for this many ms (`true`: 100). A file created again at
+   * the same path within that time is reported as one `change` instead of unlink and add, which is how editors that
+   * save by deleting and creating the file look. The files below a removed directory and `unlinkDir` are reported at
+   * once. Also skips the temporary files editors leave (`.swp`, `.swx`, a trailing `~`, Sublime's `.subl*.tmp`).
+   * With false nothing is held back, and an add is still reported after the usual quiet period. Default: true.
    */
   atomic?: boolean | number;
   /** Hold add / change back until the file's size and mtime have been stable for `stabilityThreshold` ms. */
@@ -47,7 +48,7 @@ interface Entry {
   mtimeMs: number;
   size: number;
   ino: number;
-  /** Where a link points: its target when watched as itself, the real path of the directory when followed. */
+  /** Where a link points when it is watched as itself; for a directory, its real path. */
   link?: string;
 }
 
@@ -210,7 +211,7 @@ export class FSWatcher extends EventEmitter<Events> {
     if (this.#ignored(root)) return;
     const previousProbe = this.#probes.get(root);
     // a second look with stat would follow a link that was put back in between, and report the directory it points at
-    let info = await this.#statRoot(root);
+    let info = await this.#stat(root);
     let link: string | undefined;
     if (!this.#followSymlinks && info?.isSymbolicLink()) {
       link = await readlink(root).catch(() => undefined);
@@ -246,7 +247,7 @@ export class FSWatcher extends EventEmitter<Events> {
       for (const stale of attached) this.#release(stale);
       // the root may have been created between the stat above and the watch being attached
       if (
-        await this.#statRoot(root).then(
+        await this.#stat(root).then(
           (found) => found !== undefined,
           () => false,
         )
@@ -259,8 +260,9 @@ export class FSWatcher extends EventEmitter<Events> {
     if (info.isDirectory()) {
       this.#kinds.set(root, "dir");
       this.#ensureNative(root);
-      await this.#visit(root, info, 0, mode);
-      await this.#syncDir(root, this.#depth, mode, [await realpath(root).catch(() => root)]);
+      const real = await realpath(root).catch(() => root);
+      await this.#visit(root, info, 0, mode, [], real);
+      await this.#syncDir(root, this.#depth, mode, [real]);
     } else {
       this.#kinds.set(root, "file");
       this.#ensureNative(dirname(root));
@@ -269,8 +271,8 @@ export class FSWatcher extends EventEmitter<Events> {
     if (previousProbe) this.#release(previousProbe);
   }
 
-  #statRoot(root: string): Promise<Stats | undefined> {
-    return (this.#followSymlinks ? stat(root) : lstat(root)).catch(() => undefined);
+  #stat(path: string): Promise<Stats | undefined> {
+    return (this.#followSymlinks ? stat(path) : lstat(path)).catch(() => undefined);
   }
 
   async #syncDir(
@@ -307,7 +309,6 @@ export class FSWatcher extends EventEmitter<Events> {
               const resolved = await realpath(path).catch(() => undefined);
               if (!resolved) return;
               real = resolved;
-              link = resolved;
               // a link to a directory already on the way down would loop forever
               if (ancestry.includes(real)) descend = 0;
             }
@@ -317,7 +318,14 @@ export class FSWatcher extends EventEmitter<Events> {
           }
         }
         seen.add(path);
-        await this.#visit(path, info, descend, mode, [...ancestry, real], link);
+        await this.#visit(
+          path,
+          info,
+          descend,
+          mode,
+          [...ancestry, real],
+          info.isDirectory() ? real : link,
+        );
       }),
     );
     for (const path of this.#children.get(dir) ?? []) {
@@ -348,10 +356,11 @@ export class FSWatcher extends EventEmitter<Events> {
     if (!previous) {
       if (next.dir) this.#flushUnlink(path);
       this.#setEntry(path, next);
-      if (mode !== "quiet") {
-        if (next.dir || mode === "initial") this.#dispatch(next.dir ? "addDir" : "add", path);
-        else this.#announce("add", path);
-      }
+      if (next.dir) {
+        if (mode !== "quiet") this.#dispatch("addDir", path);
+      } else if (mode === "live") this.#announce("add", path);
+      else if (this.#takeHeld(path)) this.#dispatch("change", path);
+      else if (mode === "initial") this.#dispatch("add", path);
       if (next.dir && left > 0) await this.#syncDir(path, left - 1, mode, ancestry);
       return;
     }
@@ -422,6 +431,14 @@ export class FSWatcher extends EventEmitter<Events> {
     this.emit("all", event, path);
   }
 
+  #takeHeld(path: string): boolean {
+    const held = this.#unlinks.get(path);
+    if (!held) return false;
+    clearTimeout(held);
+    this.#unlinks.delete(path);
+    return true;
+  }
+
   #flushUnlink(path: string): void {
     const held = this.#unlinks.get(path);
     if (!held) return;
@@ -439,12 +456,7 @@ export class FSWatcher extends EventEmitter<Events> {
   }
 
   #announce(event: "add" | "change", path: string): void {
-    const held = this.#unlinks.get(path);
-    if (held) {
-      clearTimeout(held);
-      this.#unlinks.delete(path);
-      event = "change";
-    }
+    if (this.#takeHeld(path)) event = "change";
     const settle = this.#settle;
     const prior = this.#settling.get(path);
     clearTimeout(prior?.timer);
@@ -461,7 +473,7 @@ export class FSWatcher extends EventEmitter<Events> {
     let last: string | undefined;
     let since = Date.now();
     const poll = async (): Promise<void> => {
-      const info = await stat(path).catch(() => undefined);
+      const info = await this.#stat(path);
       if (this.#settling.get(path) !== job) return;
       // gone: the directory diff reports the unlink, and needs this job to know whether the add was ever announced
       if (!info) return;
