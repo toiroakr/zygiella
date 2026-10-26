@@ -1,4 +1,12 @@
-import { mkdir, mkdtemp, realpath, rename, rm as removeOnce, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rename,
+  rm as removeOnce,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -152,9 +160,16 @@ describe("symbolic links", () => {
     w.on("all", (event, path) => seen.push([event, path]));
     await Promise.race([
       new Promise<void>((r) => w.once("ready", () => r())),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("ready never came: the link was followed in a loop")), 3000)),
+      new Promise((_, reject) =>
+        setTimeout(
+          () => reject(new Error("ready never came: the link was followed in a loop")),
+          3000,
+        ),
+      ),
     ]);
-    expect(seen.map(([, path]) => path)).not.toContainEqual(expect.stringContaining(join("loop", "a.txt")));
+    expect(seen.map(([, path]) => path)).not.toContainEqual(
+      expect.stringContaining(join("loop", "a.txt")),
+    );
     expect(seen).toContainEqual(["addDir", join(dir, "loop")]);
   });
 });
@@ -200,7 +215,9 @@ describe("ignored", () => {
 
 describe("awaitWriteFinish", () => {
   test("a write in several steps is reported once, after the file stops growing", async () => {
-    const { seen } = await start(dir, { awaitWriteFinish: { stabilityThreshold: 150, pollInterval: 25 } });
+    const { seen } = await start(dir, {
+      awaitWriteFinish: { stabilityThreshold: 150, pollInterval: 25 },
+    });
     const file = join(dir, "a.txt");
     await writeFile(file, "1");
     for (let i = 2; i <= 5; i++) {
@@ -214,7 +231,9 @@ describe("awaitWriteFinish", () => {
   });
 
   test("a file deleted before it settles is never reported", async () => {
-    const { seen } = await start(dir, { awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 25 } });
+    const { seen } = await start(dir, {
+      awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 25 },
+    });
     await writeFile(join(dir, "a.txt"), "1");
     await settle(60);
     await rm(join(dir, "a.txt"));
@@ -273,7 +292,9 @@ describe("add / unwatch / close", () => {
   });
 
   test("close stops reporting, and a pending awaitWriteFinish is dropped", async () => {
-    const { w, seen } = await start(dir, { awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 25 } });
+    const { w, seen } = await start(dir, {
+      awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 25 },
+    });
     await writeFile(join(dir, "a.txt"), "1");
     await settle(60);
     await w.close();

@@ -47,9 +47,10 @@ const READY_SETTLE_MS = 50;
 /** quiet: remember only. initial: report at once (it is what `ready` waits for). live: report once the burst of events is over. */
 type Mode = "quiet" | "initial" | "live";
 
-const IGNORABLE =new Set(["ENOENT", "ENOTDIR", "EACCES", "EPERM"]);
+const IGNORABLE = new Set(["ENOENT", "ENOTDIR", "EACCES", "EPERM"]);
 
-const within = (root: string, path: string): boolean => path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
+const within = (root: string, path: string): boolean =>
+  path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
 
 function matcher(ignored: Ignored | undefined): (path: string) => boolean {
   if (ignored === undefined) return () => false;
@@ -63,7 +64,8 @@ function matcher(ignored: Ignored | undefined): (path: string) => boolean {
   return (path) => all.some((m) => m(path));
 }
 
-const list = (paths: string | readonly string[]): string[] => (typeof paths === "string" ? [paths] : [...paths]).map((p) => resolve(p));
+const list = (paths: string | readonly string[]): string[] =>
+  (typeof paths === "string" ? [paths] : [...paths]).map((p) => resolve(p));
 
 export class FSWatcher extends EventEmitter<Events> {
   readonly #ignored: (path: string) => boolean;
@@ -135,7 +137,9 @@ export class FSWatcher extends EventEmitter<Events> {
 
   #start(roots: string[], mode: Mode): Promise<void> {
     for (const root of roots) this.#roots.add(root);
-    return Promise.all(roots.map((root) => this.#serial(`root:${root}`, () => this.#syncRoot(root, mode)))).then(() => undefined);
+    return Promise.all(
+      roots.map((root) => this.#serial(`root:${root}`, () => this.#syncRoot(root, mode))),
+    ).then(() => undefined);
   }
 
   /** Runs `fn` for `key` one at a time; a request made while it runs makes it run once more afterwards. */
@@ -174,7 +178,11 @@ export class FSWatcher extends EventEmitter<Events> {
       this.#kinds.set(root, "missing");
       const nearest = async (): Promise<string> => {
         let ancestor = dirname(root);
-        while (!(await stat(ancestor).catch(() => undefined))?.isDirectory() && dirname(ancestor) !== ancestor) ancestor = dirname(ancestor);
+        while (
+          !(await stat(ancestor).catch(() => undefined))?.isDirectory() &&
+          dirname(ancestor) !== ancestor
+        )
+          ancestor = dirname(ancestor);
         return ancestor;
       };
       // a deeper folder may be created while the watcher is being attached, and would then never be seen
@@ -192,7 +200,13 @@ export class FSWatcher extends EventEmitter<Events> {
       attached.delete(ancestor);
       for (const stale of attached) this.#release(stale);
       // the root may have been created between the stat above and the watch being attached
-      if (await stat(root).then(() => true, () => false)) await this.#syncRoot(root, "live");
+      if (
+        await stat(root).then(
+          () => true,
+          () => false,
+        )
+      )
+        await this.#syncRoot(root, "live");
       return;
     }
 
@@ -233,13 +247,18 @@ export class FSWatcher extends EventEmitter<Events> {
         await this.#visit(path, info, link ? 0 : left, mode);
       }),
     );
-    for (const path of [...(this.#children.get(dir) ?? [])]) {
+    for (const path of this.#children.get(dir) ?? []) {
       if (!seen.has(path) && !this.#roots.has(path)) this.#remove(path, true);
     }
   }
 
   async #visit(path: string, info: Stats, left: number, mode: Mode): Promise<void> {
-    const next: Entry = { dir: info.isDirectory(), mtimeMs: info.mtimeMs, size: info.size, ino: info.ino };
+    const next: Entry = {
+      dir: info.isDirectory(),
+      mtimeMs: info.mtimeMs,
+      size: info.size,
+      ino: info.ino,
+    };
     let previous = this.#entries.get(path);
     if (previous && previous.dir !== next.dir) {
       this.#remove(path, true);
@@ -254,7 +273,12 @@ export class FSWatcher extends EventEmitter<Events> {
       if (next.dir && left > 0) await this.#syncDir(path, left - 1, mode);
       return;
     }
-    if (!next.dir && (previous.mtimeMs !== next.mtimeMs || previous.size !== next.size || previous.ino !== next.ino)) {
+    if (
+      !next.dir &&
+      (previous.mtimeMs !== next.mtimeMs ||
+        previous.size !== next.size ||
+        previous.ino !== next.ino)
+    ) {
       this.#setEntry(path, next);
       if (mode !== "quiet") this.#announce("change", path);
     }
@@ -346,7 +370,8 @@ export class FSWatcher extends EventEmitter<Events> {
       });
       this.#native.set(dir, watcher);
     } catch (error) {
-      if (!IGNORABLE.has((error as NodeJS.ErrnoException).code ?? "")) this.emit("error", error as Error);
+      if (!IGNORABLE.has((error as NodeJS.ErrnoException).code ?? ""))
+        this.emit("error", error as Error);
     }
   }
 
@@ -365,11 +390,16 @@ export class FSWatcher extends EventEmitter<Events> {
     for (const root of this.#roots) {
       const kind = this.#kinds.get(root);
       const affected =
-        kind === "dir" ? root === dir : kind === "file" ? dirname(root) === dir : this.#probes.get(root) === dir;
+        kind === "dir"
+          ? root === dir
+          : kind === "file"
+            ? dirname(root) === dir
+            : this.#probes.get(root) === dir;
       if (affected) void this.#serial(`root:${root}`, () => this.#syncRoot(root, "live"));
     }
     const left = this.#depthLeft.get(dir);
-    if (left !== undefined && !this.#roots.has(dir)) void this.#serial(`dir:${dir}`, () => this.#syncDir(dir, left, "live"));
+    if (left !== undefined && !this.#roots.has(dir))
+      void this.#serial(`dir:${dir}`, () => this.#syncDir(dir, left, "live"));
   }
 }
 
