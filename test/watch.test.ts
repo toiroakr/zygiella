@@ -639,6 +639,56 @@ describe("ignored receives stats", () => {
     expect(seen).toHaveLength(2);
   });
 
+  test("a watched file that a stats condition starts to skip is reported as removed, and as added once it is not skipped again", async () => {
+    const file = join(dir, "a.txt");
+    await writeFile(file, "1");
+    const { w, seen } = await start(file, {
+      ignored: (_path, stats) => stats?.isFile() === true && stats.size > 5,
+    });
+    await writeFile(file, "123456789");
+    await w.rescan();
+    await until(() => seen.length > 0);
+    expect(seen).toEqual([["unlink", file]]);
+    await writeFile(file, "12");
+    await w.rescan();
+    await until(() => seen.length > 1);
+    expect(seen).toEqual([
+      ["unlink", file],
+      ["add", file],
+    ]);
+  });
+
+  test("a watched directory that a stats condition starts to skip is reported as removed with its contents, and nothing below it is reported while it is skipped", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    let skip = false;
+    const { w, seen } = await start(dir, {
+      ignored: (path, stats) => skip && stats?.isDirectory() === true && path === dir,
+    });
+    skip = true;
+    await w.rescan();
+    await until(() => seen.length >= 2);
+    expect(seen).toEqual(
+      expect.arrayContaining([
+        ["unlink", join(dir, "a.txt")],
+        ["unlinkDir", dir],
+      ]),
+    );
+    await writeFile(join(dir, "b.txt"), "1");
+    await w.rescan();
+    await settle();
+    expect(seen).toHaveLength(2);
+    skip = false;
+    await w.rescan();
+    await until(() => seen.length >= 5);
+    expect(seen.slice(2)).toEqual(
+      expect.arrayContaining([
+        ["addDir", dir],
+        ["add", join(dir, "a.txt")],
+        ["add", join(dir, "b.txt")],
+      ]),
+    );
+  });
+
   test("a link is given the stats of what it points at", async () => {
     await mkdir(join(dir, "sub"));
     const link = join(dir, "link");

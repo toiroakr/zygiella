@@ -152,7 +152,8 @@ watched path that does not exist yet.
 A path that is already being watched and then starts to be skipped because of its `stats` (for example, a size
 limit) is treated as removed: `unlink` (or `unlinkDir` with everything below it) is reported even though the file is
 still there, and nothing more is reported for it, or for a directory's contents, while it is skipped. When it stops
-being skipped it is reported as `add`.
+being skipped it is reported as `add` (with `atomic`, a file that stops being skipped within its delay is reported
+as `change`, like a file deleted and created again).
 
 ## Environments without native events
 
