@@ -14,8 +14,15 @@ export interface WatchOptions {
   depth?: number;
   /** Paths to skip. A skipped directory is not descended into. Receives absolute paths. */
   ignored?: Ignored;
+  /** Skip EACCES and EPERM silently instead of emitting `error`. Default: false. */
+  ignorePermissionErrors?: boolean;
   /** Hold add / change back until the file's size and mtime have been stable for `stabilityThreshold` ms. */
   awaitWriteFinish?: boolean | { stabilityThreshold?: number; pollInterval?: number };
+}
+
+export interface ReadyResult {
+  /** Absolute paths, in the order given, that did not exist when watching started. They are watched once they appear. */
+  missing: string[];
 }
 
 interface Events {
@@ -25,7 +32,7 @@ interface Events {
   unlink: [path: string];
   unlinkDir: [path: string];
   all: [event: WatchEvent, path: string];
-  ready: [];
+  ready: [result: ReadyResult];
   error: [error: Error];
 }
 
@@ -47,7 +54,8 @@ const READY_SETTLE_MS = 50;
 /** quiet: remember only. initial: report at once (it is what `ready` waits for). live: report once the burst of events is over. */
 type Mode = "quiet" | "initial" | "live";
 
-const IGNORABLE = new Set(["ENOENT", "ENOTDIR", "EACCES", "EPERM"]);
+const VANISHED = new Set(["ENOENT", "ENOTDIR"]);
+const DENIED = new Set(["EACCES", "EPERM"]);
 
 const within = (root: string, path: string): boolean =>
   path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
@@ -71,6 +79,7 @@ export class FSWatcher extends EventEmitter<Events> {
   readonly #ignored: (path: string) => boolean;
   readonly #ignoreInitial: boolean;
   readonly #depth: number;
+  readonly #ignorePermissionErrors: boolean;
   readonly #settle: { stabilityThreshold: number; pollInterval: number } | undefined;
 
   readonly #roots = new Set<string>();
@@ -82,15 +91,18 @@ export class FSWatcher extends EventEmitter<Events> {
   readonly #native = new Map<string, NativeWatcher>();
   readonly #queues = new Map<string, { dirty: boolean; done: Promise<void> }>();
   readonly #settling = new Map<string, Settling>();
+  readonly #denied = new Set<string>();
+  readonly #absent = new Set<string>();
   #closed = false;
 
-  #ready: Promise<void>;
+  #ready: Promise<ReadyResult>;
 
   /**
    * Resolves once the paths last given to `watch()` or `add()` are being watched, so a change made right after it
-   * is reported. The `ready` event is emitted for the paths given to `watch()` only.
+   * is reported. It resolves to the paths of that call that did not exist. The `ready` event is emitted for the
+   * paths given to `watch()` only.
    */
-  get ready(): Promise<void> {
+  get ready(): Promise<ReadyResult> {
     return this.#ready;
   }
 
@@ -99,6 +111,7 @@ export class FSWatcher extends EventEmitter<Events> {
     this.#ignored = matcher(options.ignored);
     this.#ignoreInitial = options.ignoreInitial ?? false;
     this.#depth = options.depth ?? Infinity;
+    this.#ignorePermissionErrors = options.ignorePermissionErrors ?? false;
     const awf = options.awaitWriteFinish;
     this.#settle = awf
       ? {
@@ -106,8 +119,9 @@ export class FSWatcher extends EventEmitter<Events> {
           pollInterval: (typeof awf === "object" && awf.pollInterval) || 100,
         }
       : undefined;
-    this.#ready = this.#watch(list(paths)).then(() => {
-      if (!this.#closed) this.emit("ready");
+    this.#ready = this.#watch(list(paths)).then((result) => {
+      if (!this.#closed) this.emit("ready", result);
+      return result;
     });
   }
 
@@ -119,6 +133,8 @@ export class FSWatcher extends EventEmitter<Events> {
   unwatch(paths: string | readonly string[]): this {
     for (const path of list(paths)) {
       this.#roots.delete(path);
+      this.#absent.delete(path);
+      for (const key of this.#denied) if (within(path, key)) this.#denied.delete(key);
       this.#kinds.delete(path);
       const probe = this.#probes.get(path);
       this.#probes.delete(path);
@@ -139,10 +155,12 @@ export class FSWatcher extends EventEmitter<Events> {
     await Promise.all([...this.#queues.values()].map((q) => q.done));
   }
 
-  async #watch(roots: string[]): Promise<void> {
+  async #watch(roots: string[]): Promise<ReadyResult> {
     await this.#start(roots, this.#ignoreInitial ? "quiet" : "initial");
+    const missing = [...new Set(roots)].filter((root) => this.#absent.has(root));
     // fs.watch returns before the OS starts delivering (FSEvents on macOS): a change made in that gap is never reported
     await new Promise<void>((done) => setTimeout(done, READY_SETTLE_MS));
+    return { missing };
   }
 
   #start(roots: string[], mode: Mode): Promise<void> {
@@ -165,9 +183,7 @@ export class FSWatcher extends EventEmitter<Events> {
       try {
         do {
           queue.dirty = false;
-          await fn().catch((error: NodeJS.ErrnoException) => {
-            if (!this.#closed && !IGNORABLE.has(error.code ?? "")) this.emit("error", error);
-          });
+          await fn().catch((error: NodeJS.ErrnoException) => this.#fail(error, key));
         } while (queue.dirty && !this.#closed);
       } finally {
         this.#queues.delete(key);
@@ -180,8 +196,17 @@ export class FSWatcher extends EventEmitter<Events> {
     if (this.#closed || !this.#roots.has(root)) return;
     if (this.#ignored(root)) return;
     const previousProbe = this.#probes.get(root);
-    const info = await stat(root).catch(() => undefined);
+    const info = await stat(root).catch((error: NodeJS.ErrnoException) => {
+      this.#fail(error, root);
+      if (VANISHED.has(error.code ?? "")) this.#absent.add(root);
+      else this.#absent.delete(root);
+      return undefined;
+    });
     if (this.#closed || !this.#roots.has(root)) return;
+    if (info) {
+      this.#denied.delete(root);
+      this.#absent.delete(root);
+    }
 
     if (!info) {
       this.#remove(root, true);
@@ -239,8 +264,12 @@ export class FSWatcher extends EventEmitter<Events> {
     // attach the watcher before reading, so nothing that changes during the scan is lost
     this.#depthLeft.set(dir, left);
     this.#ensureNative(dir);
-    const names = await readdir(dir).catch(() => undefined);
+    const names = await readdir(dir).catch((error: NodeJS.ErrnoException) => {
+      this.#fail(error, dir);
+      return undefined;
+    });
     if (!names || this.#closed) return;
+    this.#denied.delete(dir);
 
     const seen = new Set<string>();
     await Promise.all(
@@ -375,14 +404,23 @@ export class FSWatcher extends EventEmitter<Events> {
         this.#native.delete(dir);
         watcher.close();
         this.#onNative(dir);
-        const code = (error as NodeJS.ErrnoException).code ?? "";
-        if (!IGNORABLE.has(code)) this.emit("error", error);
+        this.#fail(error, dir);
       });
       this.#native.set(dir, watcher);
     } catch (error) {
-      if (!IGNORABLE.has((error as NodeJS.ErrnoException).code ?? ""))
-        this.emit("error", error as Error);
+      this.#fail(error as NodeJS.ErrnoException, dir);
     }
+  }
+
+  /** A path that vanished is a race with whoever removed it. A permission error is reported once per path until the path reads again. */
+  #fail(error: NodeJS.ErrnoException, path: string): void {
+    const code = error.code ?? "";
+    if (this.#closed || VANISHED.has(code)) return;
+    if (DENIED.has(code)) {
+      if (this.#ignorePermissionErrors || this.#denied.has(path)) return;
+      this.#denied.add(path);
+    }
+    this.emit("error", error);
   }
 
   #release(dir: string): void {
