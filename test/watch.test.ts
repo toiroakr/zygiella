@@ -1430,7 +1430,7 @@ describe("snapshot", () => {
       awaitWriteFinish: { stabilityThreshold: 600, pollInterval: 20 },
     });
     await writeFile(join(dir, "a.txt"), "1");
-    await settle(300);
+    await w.rescan();
     expect(w.snapshot().entries.map((e) => e.path)).toEqual([dir]);
     await until(() => seen.length > 0, 5000);
     expect(w.snapshot().entries.map((e) => e.path)).toEqual([dir, join(dir, "a.txt")]);
@@ -1441,7 +1441,7 @@ describe("snapshot", () => {
       awaitWriteFinish: { stabilityThreshold: 2000, pollInterval: 20 },
     });
     await writeFile(join(dir, "a.txt"), "1");
-    await settle(300);
+    await w.rescan();
     await w.close();
     expect(w.snapshot().entries.map((e) => e.path)).toEqual([dir]);
   });
@@ -1452,7 +1452,7 @@ describe("snapshot", () => {
       awaitWriteFinish: { stabilityThreshold: 600, pollInterval: 20 },
     });
     await writeFile(join(dir, "a.txt"), "22");
-    await settle(300);
+    await w.rescan();
     const entry = (snapshot: Snapshot) =>
       snapshot.entries.find((e) => e.path === join(dir, "a.txt"));
     expect(entry(w.snapshot())?.size).toBe(1);
@@ -1509,7 +1509,7 @@ describe("snapshot", () => {
     });
     await until(() => seen.length > 0);
     await w.close();
-    await settle(200);
+    await w.rescan();
     const files = w.snapshot().entries.filter((e) => !e.dir);
     expect(files.every((e) => seen.includes(e.path))).toBe(true);
   });
@@ -1521,9 +1521,9 @@ describe("snapshot", () => {
       awaitWriteFinish: { stabilityThreshold: 600, pollInterval: 20 },
     });
     await rm(join(dir, "a.txt"));
-    await settle(100);
+    await w.rescan();
     await writeFile(join(dir, "a.txt"), "22");
-    await settle(300);
+    await w.rescan();
     await w.close();
     const snapshot = saved(w);
     expect(snapshot.entries.find((e) => e.path === join(dir, "a.txt"))?.size).toBe(1);
@@ -1535,7 +1535,7 @@ describe("snapshot", () => {
     await writeFile(join(dir, "a.txt"), "1");
     const { w } = await start(dir, { atomic: 2000 });
     await rm(join(dir, "a.txt"));
-    await settle(200);
+    await w.rescan();
     const snapshot = saved(w);
     expect(snapshot.entries.map((e) => e.path)).toContain(join(dir, "a.txt"));
     await w.close();
