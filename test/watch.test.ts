@@ -536,6 +536,31 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
       expect(errors).toEqual([]);
     });
 
+    test("adding a directory that is still unreadable does not report it again", async () => {
+      const locked = await lockedDir(0o000);
+      const { w, errors } = await startCollecting(locked);
+      await w.add(locked).ready;
+      expect(errors).toHaveLength(1);
+    });
+
+    test("a symbolic link that is deleted and created again with an unreachable target is reported again", async () => {
+      const root = join(dir, "root");
+      const locked = join(dir, "locked");
+      await mkdir(root);
+      await mkdir(locked);
+      await symlink(join(locked, "target"), join(root, "link"));
+      await chmod(locked, 0o000);
+      const { w, errors } = await startCollecting(root);
+      const added: string[] = [];
+      w.on("add", (path) => added.push(path));
+      await until(() => errors.length === 1);
+      await removeOnce(join(root, "link"));
+      await writeFile(join(root, "marker"), "1");
+      await until(() => added.includes(join(root, "marker")));
+      await symlink(join(locked, "target"), join(root, "link"));
+      await until(() => errors.length === 2);
+    });
+
     test("ignorePermissionErrors skips unreadable directories silently", async () => {
       const locked = await lockedDir(0o000);
       const { errors } = await startCollecting(locked, { ignorePermissionErrors: true });

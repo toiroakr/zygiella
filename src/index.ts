@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { watch as nativeWatch, type FSWatcher as NativeWatcher, type Stats } from "node:fs";
 import { lstat, readdir, stat } from "node:fs/promises";
-import { dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 
 export type WatchEvent = "add" | "addDir" | "change" | "unlink" | "unlinkDir";
 
@@ -204,7 +204,7 @@ export class FSWatcher extends EventEmitter<Events> {
     });
     if (this.#closed || !this.#roots.has(root)) return;
     if (info) {
-      this.#denied.delete(root);
+      if (!info.isDirectory()) this.#denied.delete(root);
       this.#absent.delete(root);
     }
 
@@ -290,13 +290,16 @@ export class FSWatcher extends EventEmitter<Events> {
             })
           : own;
         if (!info) return;
-        this.#denied.delete(path);
+        if (link || !info.isDirectory()) this.#denied.delete(path);
         seen.add(path);
         await this.#visit(path, info, link ? 0 : left, mode);
       }),
     );
     for (const path of this.#children.get(dir) ?? []) {
       if (!seen.has(path) && !this.#roots.has(path)) this.#remove(path, true);
+    }
+    for (const path of this.#denied) {
+      if (dirname(path) === dir && !names.includes(basename(path))) this.#denied.delete(path);
     }
   }
 
