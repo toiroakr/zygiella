@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { watch, type FSWatcher } from "../src/index.ts";
+import { FSWatcher, watch } from "../src/index.ts";
 
 // the children below run the real fs.watch; only this process has it silenced
 vi.mock("node:fs", async (importOriginal) => ({
@@ -57,6 +57,36 @@ test("a change is reported once although the timer keeps reading", async () => {
   // several more reads happen before the next check
   for (let i = 0; i < 5; i++) await watcher.rescan();
   expect(seen).toEqual([`add ${join(dir, "a.txt")}`]);
+});
+
+test("the next read is scheduled once the previous one has finished, not on a fixed period", async () => {
+  vi.useFakeTimers();
+  try {
+    let finish!: () => void;
+    const rescan = vi
+      .spyOn(FSWatcher.prototype, "rescan")
+      .mockImplementation(() => new Promise<void>((done) => (finish = done)));
+    watcher = watch(dir, { ignoreInitial: true, rescanInterval: 1000 });
+    let ready = false;
+    void watcher.ready.then(() => (ready = true));
+    // the first read of the directory is real I/O, so the settle wait is only registered after it
+    for (let i = 0; i < 100 && !ready; i++) await vi.advanceTimersByTimeAsync(10);
+    expect(ready).toBe(true);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(rescan).toHaveBeenCalledTimes(1);
+    // five periods pass while that read is still running
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(rescan).toHaveBeenCalledTimes(1);
+    finish();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(rescan).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(rescan).toHaveBeenCalledTimes(2);
+  } finally {
+    await watcher?.close();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  }
 });
 
 test.each([-1, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 31])(
