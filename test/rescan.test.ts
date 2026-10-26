@@ -5,15 +5,21 @@ import { join } from "node:path";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { watch, type FSWatcher } from "../src/index.ts";
 
+const open = new Set<string>();
+
 vi.mock("node:fs", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:fs")>()),
-  watch: () => Object.assign(new EventEmitter(), { close: () => undefined }),
+  watch: (path: string) => {
+    open.add(path);
+    return Object.assign(new EventEmitter(), { close: () => open.delete(path) });
+  },
 }));
 
 let dir: string;
 let watcher: FSWatcher | undefined;
 
 beforeEach(async () => {
+  open.clear();
   dir = await realpath(await mkdtemp(join(tmpdir(), "zygiella-rescan-")));
 });
 
@@ -57,4 +63,15 @@ test("rescan reports a watched path that did not exist when it was given", async
   await watcher.rescan();
   await vi.waitUntil(() => seen.length >= 2, 3000);
   expect(seen).toEqual([`addDir ${root}`, `add ${join(root, "a.txt")}`]);
+});
+
+test("unwatch lets go of the watch on a directory root that stats skipped", async () => {
+  watcher = watch(dir, {
+    ignoreInitial: true,
+    ignored: (_path, stats) => stats?.isDirectory() === true,
+  });
+  await watcher.ready;
+  expect([...open]).toEqual([dir]);
+  watcher.unwatch(dir);
+  expect([...open]).toEqual([]);
 });

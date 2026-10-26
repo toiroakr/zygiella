@@ -334,8 +334,10 @@ export class FSWatcher extends EventEmitter<Events> {
 
     if (!this.#entries.has(root) && this.#ignored.byStats?.(root, info)) {
       // watched all the same, so that the path is read again when its stats may have changed
-      this.#probes.delete(root);
       this.#kinds.set(root, info.isDirectory() ? "dir" : "file");
+      // a directory has no entry to keep its watch while it is skipped, so the probe does, and unwatch() releases it
+      if (info.isDirectory()) this.#probes.set(root, root);
+      else this.#probes.delete(root);
       this.#ensureNative(info.isDirectory() ? root : dirname(root));
       if (previousProbe) this.#release(previousProbe);
       return;
