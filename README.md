@@ -106,6 +106,7 @@ A path that cannot be read because of permissions is not in `missing`; it is emi
 | `atomic`                 | `true`    | `true` or a number of ms (`true` is 100). An `unlink` is held back for that long, and a file created again at the same path within it is reported as one `change`, as editors that save by deleting and creating the file produce. Also ignores editor temporary files (`.swp`, `.swx`, a trailing `~`, Sublime's `.subl*.tmp`). `false` reports a deleted file's `unlink` without the wait (an `add` is still reported after the usual 50 ms, or `awaitWriteFinish`). |
 | `awaitWriteFinish`       | `false`   | `true` or `{ stabilityThreshold, pollInterval }` in ms (defaults 2000 and 100). Holds `add` and `change` back until size and mtime stop changing.                                                                                                                                                                                                                                                                                                                      |
 | `ignorePermissionErrors` | `false`   | Skip directories that cannot be read (`EACCES`, `EPERM`) silently. Otherwise each is emitted once as `error`.                                                                                                                                                                                                                                                                                                                                                          |
+| `persistent`             | `true`    | With `false`, the watcher does not keep the process alive: a process with nothing else to do exits without `close()`. Events are still reported while something else keeps the process running.                                                                                                                                                                                                                                                                        |
 
 ### Events
 
@@ -213,6 +214,7 @@ tree, so keep the interval long for a large one.
   chokidar. A RegExp written for `\\` only (`/src\\gen/`) no longer matches on Windows; `[\\/]` still does.
 - No `usePolling`, `cwd`, `alwaysStat`, and no `stats` argument on events. `rescan()` is the substitute for
   polling, called by you.
+- `persistent: false` is supported, with one difference: `ready` still resolves when nothing else keeps the process alive, because its short settle wait is not unref'd.
 - `change` events are coalesced as described above, so a rapid second write may not produce a second event.
 
 ## License
