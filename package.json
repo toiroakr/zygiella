@@ -1,6 +1,6 @@
 {
   "name": "zygiella",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "A dependency-free file watcher for Node.js, API-compatible with the subset of chokidar that most tools use",
   "keywords": [
     "chokidar",
