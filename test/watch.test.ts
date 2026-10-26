@@ -279,8 +279,7 @@ describe("add / unwatch / close", () => {
     const other = await realpath(await mkdtemp(join(tmpdir(), "zygiella-other-")));
     try {
       const { w, seen } = await start(dir);
-      w.add(other);
-      await settle(100);
+      await w.add(other).ready;
       await writeFile(join(other, "x.txt"), "1");
       await until(() => seen.length > 0);
       w.unwatch(other);
@@ -310,6 +309,19 @@ describe("add / unwatch / close", () => {
         await rm(other, { recursive: true, force: true });
       }
     }
+  });
+
+  test("calling close inside an event listener stops the all event for that report", async () => {
+    const { w, seen } = await start(dir);
+    let listened = false;
+    w.on("add", () => {
+      void w.close();
+      listened = true;
+    });
+    await writeFile(join(dir, "a.txt"), "1");
+    await until(() => listened);
+    await settle();
+    expect(seen).toEqual([]);
   });
 
   test("close stops reporting, and a pending awaitWriteFinish is dropped", async () => {
@@ -454,6 +466,7 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
       await mkdir(join(root, "locked"), { recursive: true });
       await chmod(join(root, "locked"), 0o000);
       const { errors } = await startCollecting(root);
+      await until(() => errors.length > 0);
       await settle();
       expect(errors.map((e) => e.code)).toEqual(["EACCES"]);
     });
@@ -465,6 +478,7 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
       await mkdir(join(root, "locked"));
       await chmod(join(root, "locked"), 0o000);
       await writeFile(join(root, "a.txt"), "1");
+      await until(() => errors.length > 0);
       await settle();
       expect(errors.map((e) => e.code)).toEqual(["EACCES"]);
     });
@@ -510,6 +524,7 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
       await writeFile(join(root, "a.txt"), "1");
       await chmod(root, 0o400);
       const { errors } = await startCollecting(root);
+      await until(() => errors.length > 0);
       await settle();
       expect(errors.map((e) => e.code)).toEqual(["EACCES"]);
     });
@@ -522,6 +537,7 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
       await symlink(join(locked, "target"), join(root, "link"));
       await chmod(locked, 0o000);
       const { errors } = await startCollecting(root);
+      await until(() => errors.length > 0);
       await settle();
       expect(errors.map((e) => e.code)).toEqual(["EACCES"]);
     });
@@ -561,6 +577,21 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
       await until(() => errors.length === 2);
     });
 
+    test("an entry that becomes inaccessible is neither reported as removed nor reported twice", async () => {
+      const root = join(dir, "root");
+      await mkdir(root);
+      await writeFile(join(root, "a.txt"), "1");
+      const { w, errors } = await startCollecting(root);
+      const removed: string[] = [];
+      w.on("unlink", (path) => removed.push(path));
+      await chmod(root, 0o600);
+      await until(() => errors.length === 1);
+      await chmod(root, 0o400);
+      await settle();
+      expect(errors).toHaveLength(1);
+      expect(removed).toEqual([]);
+    });
+
     test("ignorePermissionErrors skips unreadable directories silently", async () => {
       const locked = await lockedDir(0o000);
       const { errors } = await startCollecting(locked, { ignorePermissionErrors: true });
@@ -570,8 +601,11 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
 
     test("ready is emitted even when the directory is unreadable", async () => {
       const locked = await lockedDir(0o000);
-      const { w } = await startCollecting(locked);
-      await expect(w.ready).resolves.toEqual({ missing: [] });
+      const w = watch(locked, { ignoreInitial: true });
+      watchers.push(w);
+      w.on("error", () => undefined);
+      const result = await new Promise((r) => w.once("ready", r));
+      expect(result).toEqual({ missing: [] });
     });
 
     test("an unreadable path is not returned in missing", async () => {

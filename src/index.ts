@@ -92,7 +92,7 @@ export class FSWatcher extends EventEmitter<Events> {
   readonly #queues = new Map<string, { dirty: boolean; done: Promise<void> }>();
   readonly #settling = new Map<string, Settling>();
   readonly #denied = new Set<string>();
-  readonly #absent = new Set<string>();
+  readonly #missingAtStart = new Set<string>();
   #closed = false;
 
   #ready: Promise<ReadyResult>;
@@ -133,7 +133,7 @@ export class FSWatcher extends EventEmitter<Events> {
   unwatch(paths: string | readonly string[]): this {
     for (const path of list(paths)) {
       this.#roots.delete(path);
-      this.#absent.delete(path);
+      this.#missingAtStart.delete(path);
       for (const key of this.#denied) if (within(path, key)) this.#denied.delete(key);
       this.#kinds.delete(path);
       const probe = this.#probes.get(path);
@@ -157,7 +157,7 @@ export class FSWatcher extends EventEmitter<Events> {
 
   async #watch(roots: string[]): Promise<ReadyResult> {
     await this.#start(roots, this.#ignoreInitial ? "quiet" : "initial");
-    const missing = [...new Set(roots)].filter((root) => this.#absent.has(root));
+    const missing = [...new Set(roots)].filter((root) => this.#missingAtStart.delete(root));
     // fs.watch returns before the OS starts delivering (FSEvents on macOS): a change made in that gap is never reported
     await new Promise<void>((done) => setTimeout(done, READY_SETTLE_MS));
     return { missing };
@@ -198,15 +198,11 @@ export class FSWatcher extends EventEmitter<Events> {
     const previousProbe = this.#probes.get(root);
     const info = await stat(root).catch((error: NodeJS.ErrnoException) => {
       this.#fail(error, root);
-      if (VANISHED.has(error.code ?? "")) this.#absent.add(root);
-      else this.#absent.delete(root);
+      if (mode !== "live" && VANISHED.has(error.code ?? "")) this.#missingAtStart.add(root);
       return undefined;
     });
     if (this.#closed || !this.#roots.has(root)) return;
-    if (info) {
-      if (!info.isDirectory()) this.#denied.delete(root);
-      this.#absent.delete(root);
-    }
+    if (info && !info.isDirectory()) this.#denied.delete(root);
 
     if (!info) {
       this.#remove(root, true);
@@ -272,23 +268,21 @@ export class FSWatcher extends EventEmitter<Events> {
     this.#denied.delete(dir);
 
     const seen = new Set<string>();
+    const uninspectable = new Set<string>();
+    const inspectFailed = (error: NodeJS.ErrnoException, path: string): undefined => {
+      this.#fail(error, path);
+      if (!VANISHED.has(error.code ?? "")) uninspectable.add(path);
+      return undefined;
+    };
     await Promise.all(
       names.map(async (name) => {
         const path = join(dir, name);
         if (this.#ignored(path)) return;
-        const own = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-          this.#fail(error, path);
-          return undefined;
-        });
+        const own = await lstat(path).catch((error) => inspectFailed(error, path));
         if (!own) return;
         // a link is reported as what it points at, but never descended into: a link back to an ancestor would loop forever
         const link = own.isSymbolicLink();
-        const info = link
-          ? await stat(path).catch((error: NodeJS.ErrnoException) => {
-              this.#fail(error, path);
-              return undefined;
-            })
-          : own;
+        const info = link ? await stat(path).catch((error) => inspectFailed(error, path)) : own;
         if (!info) return;
         if (link || !info.isDirectory()) this.#denied.delete(path);
         seen.add(path);
@@ -296,10 +290,12 @@ export class FSWatcher extends EventEmitter<Events> {
       }),
     );
     for (const path of this.#children.get(dir) ?? []) {
-      if (!seen.has(path) && !this.#roots.has(path)) this.#remove(path, true);
+      if (!seen.has(path) && !uninspectable.has(path) && !this.#roots.has(path))
+        this.#remove(path, true);
     }
+    const listed = new Set(names);
     for (const path of this.#denied) {
-      if (dirname(path) === dir && !names.includes(basename(path))) this.#denied.delete(path);
+      if (dirname(path) === dir && !listed.has(basename(path))) this.#denied.delete(path);
     }
   }
 
@@ -369,7 +365,7 @@ export class FSWatcher extends EventEmitter<Events> {
     if (this.#closed) return;
     // `emit` forwards the arguments as given, and the events map types them per event
     (this.emit as (event: string, ...args: unknown[]) => boolean)(event, path);
-    this.emit("all", event, path);
+    if (!this.#closed) this.emit("all", event, path);
   }
 
   #announce(event: "add" | "change", path: string): void {
