@@ -63,8 +63,11 @@ The whole library is `src/index.ts`; the tests are `test/watch.test.ts` and run 
   the diff in the `seed` mode, which `since` (even `null` or an unusable one) selects, so it overrides `ignoreInitial`.
   `seed` is `initial` that also reports `change` and `unlink` at once, because they must come before `ready`; `add()`
   keeps `initial`, with its quiet period and `atomic` hold. A `Settling` job for a change keeps `before`, the entry
-  that was last reported, and `snapshot()` (and `close()`, which restores it) records that; a path whose `add` is
-  still waiting is left out, so the next run reports it.
+  that was last reported, and a held unlink in `#unlinks` keeps its entry; `snapshot()` (and `close()`, which restores
+  them) records those, so a change or unlink that was never reported is reported by the next run. A path whose `add`
+  is still waiting is left out. Seeding keeps an entry only if its parent was kept, so no entry sits below one that is
+  missing, and a scan that is still reading when `close()` is called adds nothing to the baseline (`#visit` and the
+  removal in `#syncDir` return once closed).
 - With `atomic`, the unlink of a file is held back in `#unlinks` for the window, and an `add` announced for the same
   path in that time becomes a `change`. A removed directory reports what is below it at once, flushing held unlinks
   first. `atomic` also adds the editor temporary file patterns to `ignored`.

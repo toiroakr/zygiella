@@ -195,7 +195,8 @@ export class FSWatcher extends EventEmitter<Events> {
   readonly #native = new Map<string, NativeWatcher>();
   readonly #queues = new Map<string, { dirty: boolean; done: Promise<void> }>();
   readonly #settling = new Map<string, Settling>();
-  readonly #unlinks = new Map<string, NodeJS.Timeout>();
+  /** An unlink held back for `atomic`: it is not reported yet, so `entry` is still what was last reported. */
+  readonly #unlinks = new Map<string, { timer: NodeJS.Timeout; entry: Entry }>();
   readonly #denied = new Set<string>();
   readonly #unwatched = new Set<string>();
   readonly #missingAtStart = new Set<string>();
@@ -251,9 +252,9 @@ export class FSWatcher extends EventEmitter<Events> {
   }
 
   /**
-   * The state to start the next run from (`since`). A path still waiting to be reported is left out, so that the
-   * next run reports it. A file deleted within the last `atomic` window is not in it either, and its `unlink`
-   * is then not reported by the next run.
+   * The state to start the next run from (`since`): what has been reported so far. A file whose `add` is still
+   * waiting is left out, so the next run reports it; a `change` that is waiting, or an `unlink` held back for
+   * `atomic`, is recorded as it was before, so the next run reports that too.
    */
   snapshot(): Snapshot {
     const entries: SnapshotEntry[] = [];
@@ -267,6 +268,7 @@ export class FSWatcher extends EventEmitter<Events> {
           : { path, dir, mtimeMs, size, ino, link },
       );
     }
+    for (const [path, { entry }] of this.#unlinks) entries.push({ path, ...entry });
     entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
     return { version: SNAPSHOT_VERSION, entries };
   }
@@ -274,8 +276,12 @@ export class FSWatcher extends EventEmitter<Events> {
   /** Remembers what `since` holds for the watched roots, so the first scan reports only the difference. */
   #seed(since: Snapshot | null | undefined, roots: string[]): void {
     if (!since || since.version !== SNAPSHOT_VERSION || !Array.isArray(since.entries)) return;
-    for (const entry of since.entries) {
-      if (!isSnapshotEntry(entry)) continue;
+    const kept = new Set<string>();
+    // shallow first, so that whether the parent was kept is known
+    const usable = since.entries
+      .filter(isSnapshotEntry)
+      .sort((x, y) => x.path.length - y.path.length);
+    for (const entry of usable) {
       const root = roots
         .filter((r) => within(r, entry.path))
         .sort((a, b) => b.length - a.length)[0];
@@ -290,6 +296,9 @@ export class FSWatcher extends EventEmitter<Events> {
         if (roots.includes(path) || dirname(path) === path) break;
       }
       if (skipped) continue;
+      // below an entry that is missing, it can never be reached from its parent, and would stay in the baseline
+      if (!roots.includes(entry.path) && !kept.has(dirname(entry.path))) continue;
+      kept.add(entry.path);
       const { dir, mtimeMs, size, ino, link } = entry;
       this.#setEntry(entry.path, { dir, mtimeMs, size, ino, link });
     }
@@ -365,7 +374,10 @@ export class FSWatcher extends EventEmitter<Events> {
       else this.#entries.delete(path);
     }
     this.#settling.clear();
-    for (const timer of this.#unlinks.values()) clearTimeout(timer);
+    for (const [path, { timer, entry }] of this.#unlinks) {
+      clearTimeout(timer);
+      this.#entries.set(path, entry);
+    }
     this.#unlinks.clear();
     for (const watcher of this.#native.values()) watcher.close();
     this.#native.clear();
@@ -570,6 +582,7 @@ export class FSWatcher extends EventEmitter<Events> {
         );
       }),
     );
+    if (this.#closed) return;
     for (const path of this.#children.get(dir) ?? []) {
       if (!seen.has(path) && !uninspectable.has(path) && !this.#roots.has(path))
         this.#remove(path, true, undefined, mode !== "seed");
@@ -588,6 +601,8 @@ export class FSWatcher extends EventEmitter<Events> {
     ancestry: readonly string[] = [],
     link?: string,
   ): Promise<void> {
+    // a scan that was reading when close() was called must not add what was never reported to the baseline
+    if (this.#closed) return;
     const next: Entry = {
       dir: info.isDirectory(),
       mtimeMs: info.mtimeMs,
@@ -644,7 +659,7 @@ export class FSWatcher extends EventEmitter<Events> {
     only: (key: string) => boolean = () => true,
     defer = false,
   ): void {
-    for (const [key, timer] of this.#unlinks) {
+    for (const [key, { timer }] of this.#unlinks) {
       if (!within(path, key) || !only(key) || (report && key === path)) continue;
       clearTimeout(timer);
       this.#unlinks.delete(key);
@@ -670,7 +685,7 @@ export class FSWatcher extends EventEmitter<Events> {
       // an add that never settled was never reported, so there is nothing to take back
       if (!report || job?.event === "add") continue;
       if (entry.dir) this.#dispatch("unlinkDir", key);
-      else if (defer && this.#atomic > 0 && key === path) this.#holdUnlink(key);
+      else if (defer && this.#atomic > 0 && key === path) this.#holdUnlink(key, entry);
       else this.#dispatch("unlink", key);
     }
   }
@@ -682,38 +697,35 @@ export class FSWatcher extends EventEmitter<Events> {
     if (!this.#closed) this.emit("all", event, path);
   }
 
-  #takeHeld(path: string): boolean {
+  #takeHeld(path: string): Entry | undefined {
     const held = this.#unlinks.get(path);
-    if (!held) return false;
-    clearTimeout(held);
+    if (!held) return undefined;
+    clearTimeout(held.timer);
     this.#unlinks.delete(path);
-    return true;
+    return held.entry;
   }
 
   #flushUnlink(path: string): void {
-    const held = this.#unlinks.get(path);
-    if (!held) return;
-    clearTimeout(held);
-    this.#unlinks.delete(path);
-    this.#dispatch("unlink", path);
+    if (this.#takeHeld(path)) this.#dispatch("unlink", path);
   }
 
-  #holdUnlink(path: string): void {
+  #holdUnlink(path: string, entry: Entry): void {
     const timer = this.#timeout(() => {
       this.#unlinks.delete(path);
       this.#dispatch("unlink", path);
     }, this.#atomic);
-    this.#unlinks.set(path, timer);
+    this.#unlinks.set(path, { timer, entry });
   }
 
   #announce(event: "add" | "change", path: string, before?: Entry): void {
-    if (this.#takeHeld(path)) event = "change";
+    const held = this.#takeHeld(path);
+    if (held) event = "change";
     const settle = this.#settle;
     const prior = this.#settling.get(path);
     clearTimeout(prior?.timer);
     const job: Settling = {
       event: prior?.event === "add" ? "add" : event,
-      before: prior ? prior.before : before,
+      before: prior ? prior.before : (before ?? held),
     };
     this.#settling.set(path, job);
     if (!settle) {

@@ -1486,6 +1486,64 @@ describe("snapshot", () => {
     await until(() => seen.some(([e]) => e === "change"), 5000);
   });
 
+  test("an entry whose parent directory is missing from the snapshot is dropped, not kept unreachable", async () => {
+    await mkdir(join(dir, "sub"));
+    await writeFile(join(dir, "sub", "a.txt"), "1");
+    const snapshot = await stopped(dir);
+    snapshot.entries = snapshot.entries.filter((e) => e.path !== join(dir, "sub"));
+    await rm(join(dir, "sub"), { recursive: true });
+    const { w, seen } = await start(dir, { since: snapshot });
+    await settle();
+    expect(seen).toEqual([]);
+    expect(w.snapshot().entries.map((e) => e.path)).toEqual([dir]);
+  });
+
+  test("files read after close() is called from a listener are not in the snapshot taken afterwards", async () => {
+    for (let i = 0; i < 40; i++) await writeFile(join(dir, `f${i}.txt`), "1");
+    const w = watch(dir, { ignoreInitial: false });
+    watchers.push(w);
+    const seen: string[] = [];
+    w.on("add", (path) => {
+      seen.push(path);
+      void w.close();
+    });
+    await until(() => seen.length > 0);
+    await w.close();
+    await settle(200);
+    const files = w.snapshot().entries.filter((e) => !e.dir);
+    expect(files.every((e) => seen.includes(e.path))).toBe(true);
+  });
+
+  test("a file deleted and created again within the atomic window keeps its reported state in the snapshot", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { w } = await start(dir, {
+      atomic: 500,
+      awaitWriteFinish: { stabilityThreshold: 600, pollInterval: 20 },
+    });
+    await rm(join(dir, "a.txt"));
+    await settle(100);
+    await writeFile(join(dir, "a.txt"), "22");
+    await settle(300);
+    await w.close();
+    const snapshot = saved(w);
+    expect(snapshot.entries.find((e) => e.path === join(dir, "a.txt"))?.size).toBe(1);
+    const { seen } = await start(dir, { since: snapshot });
+    expect(seen).toEqual([["change", join(dir, "a.txt")]]);
+  });
+
+  test("a file whose unlink is still held back is in the snapshot, so the next start reports the unlink", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { w } = await start(dir, { atomic: 2000 });
+    await rm(join(dir, "a.txt"));
+    await settle(200);
+    const snapshot = saved(w);
+    expect(snapshot.entries.map((e) => e.path)).toContain(join(dir, "a.txt"));
+    await w.close();
+    expect(saved(w).entries.map((e) => e.path)).toContain(join(dir, "a.txt"));
+    const { seen } = await start(dir, { since: snapshot });
+    expect(seen).toEqual([["unlink", join(dir, "a.txt")]]);
+  });
+
   test("a directory is in the snapshot as a directory with the file entries around it", async () => {
     await mkdir(join(dir, "sub"));
     await writeFile(join(dir, "sub", "a.txt"), "12");

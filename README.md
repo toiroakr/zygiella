@@ -222,10 +222,10 @@ await watcher.close();
   (by its path, or because a directory above it is skipped) is left out of the comparison, so it is not reported as
   `unlink`; so is a path deeper than `depth` now. Turning `followSymlinks` off makes what was below a link count as
   removed.
-- Take it once the watcher is quiet. A path still waiting to be reported (the 50 ms quiet period, or
-  `awaitWriteFinish`) is left out, so the next start reports it as `add`, also when `snapshot()` is called after
-  `close()`. A file deleted within the last `atomic` window is not in it, and the next start cannot report its
-  `unlink`.
+- The snapshot is what has been reported so far. A file whose `add` is still waiting (the 50 ms quiet period, or
+  `awaitWriteFinish`) is left out, so the next start reports it as `add`. A `change` that is waiting, or an `unlink`
+  held back by `atomic`, is recorded as it was before, so the next start reports `change` or `unlink`. This also holds
+  for `snapshot()` called after `close()`.
 
 ## Behavior
 
