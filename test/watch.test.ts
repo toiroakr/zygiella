@@ -689,6 +689,22 @@ describe("ignored receives stats", () => {
     );
   });
 
+  test("a root that is skipped by stats does not take down another root watched inside it", async () => {
+    await mkdir(join(dir, "inner"));
+    let skip = false;
+    const { w, seen } = await start([dir, join(dir, "inner")], {
+      ignored: (path, stats) => skip && stats?.isDirectory() === true && path === dir,
+    });
+    skip = true;
+    await w.rescan();
+    await settle();
+    seen.length = 0;
+    await writeFile(join(dir, "inner", "a.txt"), "1");
+    await w.rescan();
+    await until(() => seen.length > 0);
+    expect(seen).toEqual([["add", join(dir, "inner", "a.txt")]]);
+  });
+
   test("a link is given the stats of what it points at", async () => {
     await mkdir(join(dir, "sub"));
     const link = join(dir, "link");

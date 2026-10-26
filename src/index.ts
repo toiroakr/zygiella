@@ -326,7 +326,13 @@ export class FSWatcher extends EventEmitter<Events> {
     }
 
     if (this.#ignored.byStats?.(root, info)) {
-      this.#remove(root, true, undefined, true);
+      this.#remove(
+        root,
+        true,
+        (key) => ![...this.#roots].some((other) => other !== root && within(other, key)),
+        true,
+      );
+      this.#probes.delete(root);
       if (info.isDirectory()) {
         this.#kinds.set(root, "dir");
         // kept so that a change to the directory is noticed and it is seen again once it is not skipped
@@ -336,7 +342,7 @@ export class FSWatcher extends EventEmitter<Events> {
         this.#kinds.set(root, "file");
         this.#ensureNative(dirname(root));
       }
-      if (previousProbe && previousProbe !== root) this.#release(previousProbe);
+      if (previousProbe) this.#release(previousProbe);
       return;
     }
     this.#probes.delete(root);
