@@ -190,8 +190,8 @@ simply stays silent, so no directory is in `unwatched`, and reading only those w
 `rescan()` resolves once the directories have been read. `add` and `change` are reported after the usual wait
 (50 ms of quiet, or `awaitWriteFinish`), so they can arrive after the promise resolves. A `rescan()` call made while
 a read is running does not report the same change twice, and after `close()` it does nothing. Every read covers the
-whole tree, so keep the interval long for a large one. `rescanInterval` must be a number from 0 to 2147483647; anything else (including `false` and a numeric string) throws
-a `RangeError`.
+whole tree, so keep the interval long for a large one. `rescanInterval` must be a number from 0 to 2147483647; any other number, and any value that is not a number
+(including `false` and a numeric string), throws a `RangeError`. `undefined` and `null` mean the default, 0.
 
 ## Behavior
 
