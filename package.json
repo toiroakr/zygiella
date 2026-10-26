@@ -2,11 +2,30 @@
   "name": "zygiella",
   "version": "0.0.0",
   "description": "A dependency-free file watcher for Node.js, API-compatible with the subset of chokidar that most tools use",
-  "keywords": ["watch", "watcher", "fs.watch", "chokidar"],
+  "keywords": [
+    "chokidar",
+    "file-watcher",
+    "fs.watch",
+    "watch",
+    "watcher"
+  ],
+  "homepage": "https://github.com/toiroakr/zygiella#readme",
+  "bugs": {
+    "url": "https://github.com/toiroakr/zygiella/issues"
+  },
   "license": "MIT",
+  "author": "toiroakr",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/toiroakr/zygiella.git"
+  },
+  "files": [
+    "dist"
+  ],
   "type": "module",
   "sideEffects": false,
-  "files": ["dist"],
+  "main": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
   "exports": {
     ".": {
       "types": "./dist/index.d.mts",
@@ -16,16 +35,35 @@
   "scripts": {
     "build": "tsdown",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint -c oxlint.json src test",
+    "lint:fix": "oxlint -c oxlint.json --fix src test",
+    "format": "oxfmt src test",
+    "format:check": "oxfmt --check src test",
+    "fix:oxlint": "oxlint -c oxlint.json --fix",
+    "fix:oxfmt": "oxfmt",
+    "knip": "knip",
+    "publint": "publint",
+    "prepare": "lefthook install",
+    "prepublishOnly": "pnpm run build",
+    "changeset": "changeset",
+    "release": "pnpm run build && changeset publish"
   },
   "devDependencies": {
+    "@changesets/cli": "^3.0.3",
     "@types/node": "^24.0.0",
+    "knip": "^6.42.0",
+    "lefthook": "^2.2.2",
+    "oxfmt": "^0.73.0",
+    "oxlint": "^1.88.0",
+    "publint": "^0.3.25",
     "tsdown": "^0.23.2",
     "typescript": "^5.9.0",
     "vitest": "^5.0.5"
   },
-  "packageManager": "pnpm@9.15.9",
   "engines": {
     "node": ">=22.18.0"
-  }
+  },
+  "packageManager": "pnpm@12.14.0"
 }

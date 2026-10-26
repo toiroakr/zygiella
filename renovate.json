@@ -1,0 +1,41 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices",
+    ":automergeMinor",
+    ":dependencyDashboard",
+    "github>aquaproj/aqua-renovate-config#2.13.0"
+  ],
+  "labels": ["dependencies"],
+  "gitIgnoredAuthors": ["271965483+toiroakr-release-bot[bot]@users.noreply.github.com"],
+  "minimumReleaseAge": "7 days",
+  "prCreation": "not-pending",
+  "internalChecksFilter": "strict",
+  "internalChecksAsSuccess": true,
+  "prConcurrentLimit": 5,
+  "rangeStrategy": "bump",
+  "packageRules": [
+    {
+      "matchDepTypes": ["devDependencies"],
+      "automerge": true,
+      "rangeStrategy": "bump"
+    },
+    {
+      "groupName": "testing",
+      "matchPackageNames": ["vitest", "@vitest/*"]
+    },
+    {
+      "groupName": "linting and formatting",
+      "matchPackageNames": ["oxlint", "oxfmt", "knip"]
+    },
+    {
+      "groupName": "typescript",
+      "matchPackageNames": ["typescript", "@types/*", "@typescript/*"]
+    },
+    {
+      "matchDatasources": ["npm"],
+      "matchUpdateTypes": ["major", "minor", "patch"],
+      "minimumReleaseAge": "7 days"
+    }
+  ]
+}
