@@ -1,4 +1,5 @@
 import {
+  chmod,
   mkdir,
   mkdtemp,
   realpath,
@@ -278,8 +279,7 @@ describe("add / unwatch / close", () => {
     const other = await realpath(await mkdtemp(join(tmpdir(), "zygiella-other-")));
     try {
       const { w, seen } = await start(dir);
-      w.add(other);
-      await settle(100);
+      await w.add(other).ready;
       await writeFile(join(other, "x.txt"), "1");
       await until(() => seen.length > 0);
       w.unwatch(other);
@@ -311,6 +311,19 @@ describe("add / unwatch / close", () => {
     }
   });
 
+  test("calling close inside an event listener stops the all event for that report", async () => {
+    const { w, seen } = await start(dir);
+    let listened = false;
+    w.on("add", () => {
+      void w.close();
+      listened = true;
+    });
+    await writeFile(join(dir, "a.txt"), "1");
+    await until(() => listened);
+    await settle();
+    expect(seen).toEqual([]);
+  });
+
   test("close stops reporting, and a pending awaitWriteFinish is dropped", async () => {
     const { w, seen } = await start(dir, {
       awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 25 },
@@ -333,3 +346,287 @@ describe("add / unwatch / close", () => {
     expect(seen).toEqual([["add", join(dir, "a.txt")]]);
   });
 });
+
+describe("missing paths", () => {
+  test("a path that does not exist is returned in missing by ready, and is not an error", async () => {
+    const missing = join(dir, "missing");
+    const w = watch(missing, { ignoreInitial: true });
+    watchers.push(w);
+    await expect(w.ready).resolves.toEqual({ missing: [missing] });
+  });
+
+  test("the ready event receives the same result", async () => {
+    const missing = join(dir, "missing");
+    const w = watch(missing, { ignoreInitial: true });
+    watchers.push(w);
+    const result = await new Promise((r) => w.once("ready", r));
+    expect(result).toEqual({ missing: [missing] });
+  });
+
+  test("only the paths that do not exist are returned, in the order given", async () => {
+    const first = join(dir, "first");
+    const second = join(dir, "second");
+    const present = join(dir, "present");
+    await mkdir(present);
+    const w = watch([first, present, second], { ignoreInitial: true });
+    watchers.push(w);
+    await expect(w.ready).resolves.toEqual({ missing: [first, second] });
+  });
+
+  test("a path below a file is returned in missing", async () => {
+    const file = join(dir, "file");
+    await writeFile(file, "1");
+    const below = join(file, "child");
+    const w = watch(below, { ignoreInitial: true });
+    watchers.push(w);
+    await expect(w.ready).resolves.toEqual({ missing: [below] });
+  });
+
+  test("existing paths give an empty missing", async () => {
+    const w = watch(dir, { ignoreInitial: true });
+    watchers.push(w);
+    await expect(w.ready).resolves.toEqual({ missing: [] });
+  });
+
+  test("a missing path that is created afterwards is watched and reports add", async () => {
+    const missing = join(dir, "later");
+    const { w, seen } = await start(missing);
+    await mkdir(missing);
+    await w.ready;
+    await writeFile(join(missing, "a.txt"), "1");
+    await until(() => seen.some(([event]) => event === "add"));
+    expect(seen.at(-1)).toEqual(["add", join(missing, "a.txt")]);
+  });
+
+  test("ready after add returns only the paths given to that add", async () => {
+    const { w } = await start(join(dir, "initially-missing"));
+    const present = join(dir, "present");
+    const absent = join(dir, "absent");
+    await mkdir(present);
+    await expect(w.add([present, absent]).ready).resolves.toEqual({ missing: [absent] });
+    await expect(w.add(present).ready).resolves.toEqual({ missing: [] });
+  });
+
+  test("a missing path is returned again when it is unwatched and added", async () => {
+    const missing = join(dir, "again");
+    const { w } = await start(missing);
+    w.unwatch(missing);
+    await expect(w.add(missing).ready).resolves.toEqual({ missing: [missing] });
+  });
+
+  test("overlapping adds of the same missing path each return it", async () => {
+    const missing = join(dir, "overlap");
+    const { w } = await start(dir);
+    const first = w.add(missing).ready;
+    const second = w.add(missing).ready;
+    await expect(first).resolves.toEqual({ missing: [missing] });
+    await expect(second).resolves.toEqual({ missing: [missing] });
+  });
+
+  test("a path added while missing is watched once it appears", async () => {
+    const { w, seen } = await start(dir);
+    const missing = join(dir, "added-later");
+    await w.add(missing).ready;
+    await mkdir(missing);
+    await until(() => seen.some(([event, path]) => event === "addDir" && path === missing));
+    await w.ready;
+    await writeFile(join(missing, "a.txt"), "1");
+    await until(() => seen.some(([event]) => event === "add"));
+  });
+});
+
+describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+  "permission errors",
+  () => {
+    async function startCollecting(path: string, opts: Parameters<typeof watch>[1] = {}) {
+      const w = watch(path, { ignoreInitial: true, ...opts });
+      watchers.push(w);
+      const errors: NodeJS.ErrnoException[] = [];
+      w.on("error", (error) => errors.push(error));
+      await w.ready;
+      return { w, errors };
+    }
+
+    async function lockedDir(mode: number) {
+      const locked = join(dir, "locked");
+      await mkdir(locked);
+      await chmod(locked, mode);
+      return locked;
+    }
+
+    afterEach(async () => {
+      await chmod(join(dir, "locked"), 0o755).catch(() => undefined);
+      await chmod(join(dir, "root"), 0o755).catch(() => undefined);
+      await chmod(join(dir, "root", "locked"), 0o755).catch(() => undefined);
+    });
+
+    test.each([0o000, 0o100])(
+      "a watched directory with mode %o is reported once as an error",
+      async (mode) => {
+        const locked = await lockedDir(mode);
+        const { errors } = await startCollecting(locked);
+        await settle();
+        expect(errors.map((e) => e.code)).toEqual(["EACCES"]);
+      },
+    );
+
+    test("an unreadable subdirectory is reported as an error", async () => {
+      const root = join(dir, "root");
+      await mkdir(join(root, "locked"), { recursive: true });
+      await chmod(join(root, "locked"), 0o000);
+      const { errors } = await startCollecting(root);
+      await until(() => errors.length > 0);
+      await settle();
+      expect(errors.map((e) => e.code)).toEqual(["EACCES"]);
+    });
+
+    test("an unreadable subdirectory that appears later is reported as an error", async () => {
+      const root = join(dir, "root");
+      await mkdir(root);
+      const { errors } = await startCollecting(root);
+      await mkdir(join(root, "locked"));
+      await chmod(join(root, "locked"), 0o000);
+      await writeFile(join(root, "a.txt"), "1");
+      await until(() => errors.length > 0);
+      await settle();
+      expect(errors.map((e) => e.code)).toEqual(["EACCES"]);
+    });
+
+    test("the same unreadable directory is not reported again when its parent changes", async () => {
+      const root = join(dir, "root");
+      await mkdir(join(root, "locked"), { recursive: true });
+      await chmod(join(root, "locked"), 0o000);
+      const { errors } = await startCollecting(root);
+      await writeFile(join(root, "a.txt"), "1");
+      await settle();
+      await writeFile(join(root, "b.txt"), "1");
+      await settle();
+      expect(errors).toHaveLength(1);
+    });
+
+    test("an unreadable directory that is removed and created again is reported again", async () => {
+      const root = join(dir, "root");
+      await mkdir(join(root, "locked"), { recursive: true });
+      await chmod(join(root, "locked"), 0o000);
+      const { w, errors } = await startCollecting(root);
+      let removed = false;
+      w.on("unlinkDir", () => (removed = true));
+      await until(() => errors.length === 1);
+      await rm(join(root, "locked"), { recursive: true });
+      await until(() => removed);
+      await mkdir(join(root, "locked"));
+      await chmod(join(root, "locked"), 0o000);
+      await until(() => errors.length === 2);
+    });
+
+    test("an unreadable directory is reported again after unwatch and add", async () => {
+      const locked = await lockedDir(0o000);
+      const { w, errors } = await startCollecting(locked);
+      w.unwatch(locked);
+      await w.add(locked).ready;
+      expect(errors).toHaveLength(2);
+    });
+
+    test("an entry that cannot be inspected inside a listable directory is reported once", async () => {
+      const root = join(dir, "root");
+      await mkdir(root);
+      await writeFile(join(root, "a.txt"), "1");
+      await chmod(root, 0o400);
+      const { errors } = await startCollecting(root);
+      await until(() => errors.length > 0);
+      await settle();
+      expect(errors.map((e) => e.code)).toEqual(["EACCES"]);
+    });
+
+    test("a symbolic link whose target cannot be reached is reported once", async () => {
+      const root = join(dir, "root");
+      const locked = join(dir, "locked");
+      await mkdir(root);
+      await mkdir(locked);
+      await symlink(join(locked, "target"), join(root, "link"));
+      await chmod(locked, 0o000);
+      const { errors } = await startCollecting(root);
+      await until(() => errors.length > 0);
+      await settle();
+      expect(errors.map((e) => e.code)).toEqual(["EACCES"]);
+    });
+
+    test("ignorePermissionErrors skips entries that cannot be inspected silently", async () => {
+      const root = join(dir, "root");
+      await mkdir(root);
+      await writeFile(join(root, "a.txt"), "1");
+      await chmod(root, 0o400);
+      const { errors } = await startCollecting(root, { ignorePermissionErrors: true });
+      await settle();
+      expect(errors).toEqual([]);
+    });
+
+    test("adding a directory that is still unreadable does not report it again", async () => {
+      const locked = await lockedDir(0o000);
+      const { w, errors } = await startCollecting(locked);
+      await w.add(locked).ready;
+      expect(errors).toHaveLength(1);
+    });
+
+    test("a symbolic link that is deleted and created again with an unreachable target is reported again", async () => {
+      const root = join(dir, "root");
+      const locked = join(dir, "locked");
+      await mkdir(root);
+      await mkdir(locked);
+      await symlink(join(locked, "target"), join(root, "link"));
+      await chmod(locked, 0o000);
+      const { w, errors } = await startCollecting(root);
+      const added: string[] = [];
+      w.on("add", (path) => added.push(path));
+      await until(() => errors.length === 1);
+      await removeOnce(join(root, "link"));
+      await writeFile(join(root, "marker"), "1");
+      await until(() => added.includes(join(root, "marker")));
+      await symlink(join(locked, "target"), join(root, "link"));
+      await until(() => errors.length === 2);
+    });
+
+    test("an entry that becomes inaccessible is neither reported as removed nor reported twice", async () => {
+      const root = join(dir, "root");
+      await mkdir(root);
+      await writeFile(join(root, "a.txt"), "1");
+      const { w, errors } = await startCollecting(root);
+      const removed: string[] = [];
+      w.on("unlink", (path) => removed.push(path));
+      await chmod(root, 0o600);
+      await until(() => errors.length === 1);
+      await chmod(root, 0o400);
+      await settle();
+      expect(errors).toHaveLength(1);
+      expect(removed).toEqual([]);
+    });
+
+    test("ignorePermissionErrors skips unreadable directories silently", async () => {
+      const locked = await lockedDir(0o000);
+      const { errors } = await startCollecting(locked, { ignorePermissionErrors: true });
+      await settle();
+      expect(errors).toEqual([]);
+    });
+
+    test("ready is emitted even when the directory is unreadable", async () => {
+      const locked = await lockedDir(0o000);
+      const w = watch(locked, { ignoreInitial: true });
+      watchers.push(w);
+      w.on("error", () => undefined);
+      const result = await new Promise((r) => w.once("ready", r));
+      expect(result).toEqual({ missing: [] });
+    });
+
+    test("an unreadable path is not returned in missing", async () => {
+      const locked = await lockedDir(0o000);
+      const { w } = await startCollecting(join(locked, "child"));
+      await expect(w.ready).resolves.toEqual({ missing: [] });
+    });
+
+    test("a path that does not exist is not an error", async () => {
+      const { errors } = await startCollecting(join(dir, "missing"));
+      await settle();
+      expect(errors).toEqual([]);
+    });
+  },
+);
