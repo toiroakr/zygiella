@@ -398,11 +398,7 @@ export class FSWatcher extends EventEmitter<Events> {
           }
         }
         if (own.isSymbolicLink() || !info.isDirectory()) this.#denied.delete(path);
-        if (this.#ignored.byStats?.(path, info)) {
-          // a tracked path stays tracked, so a condition on size or mtime is not reported as the file being removed
-          if (this.#entries.has(path)) seen.add(path);
-          return;
-        }
+        if (this.#ignored.byStats?.(path, info)) return;
         seen.add(path);
         await this.#visit(
           path,

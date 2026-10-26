@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `zygiella` is a dependency-free file watcher for Node.js built on `fs.watch`. It implements the subset of the
 chokidar API that most tools use: `watch(paths, options)`, the `FSWatcher` events (`add`, `addDir`, `change`,
-`unlink`, `unlinkDir`, `all`, `ready`, `error`) and methods (`add`, `unwatch`, `close`), and the options
+`unlink`, `unlinkDir`, `all`, `ready`, `error`) and methods (`add`, `unwatch`, `rescan`, `close`), and the options
 `ignored`, `ignoreInitial`, `depth`, `followSymlinks`, `atomic`, `awaitWriteFinish` and `ignorePermissionErrors`. Do
 not add the rest of chokidar's surface (globs, polling, `cwd`, `stats`); being small is the point. `rescan()` is not polling: it runs only when the user calls
 it, so an interval is the user's to write.

@@ -150,8 +150,9 @@ default), the link itself with `followSymlinks: false`. A link that points at no
 watched path that does not exist yet.
 
 A path that is already being watched and then starts to be skipped because of its `stats` (for example, a size
-limit) is not reported as `unlink`, and nothing is reported for it while it is skipped. When it stops being
-skipped, it is reported as `change` if it differs from what was last seen.
+limit) is treated as removed: `unlink` (or `unlinkDir` with everything below it) is reported even though the file is
+still there, and nothing more is reported for it, or for a directory's contents, while it is skipped. When it stops
+being skipped it is reported as `add`.
 
 ## Environments without native events
 
@@ -167,6 +168,7 @@ may not work at all. The watcher then stays silent while files change. Options, 
 
 ```ts
 const watcher = watch("src", { ignoreInitial: true });
+watcher.on("error", (error) => console.error(error));
 setInterval(() => void watcher.rescan(), 2000);
 ```
 
