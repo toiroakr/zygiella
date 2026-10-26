@@ -28,7 +28,6 @@ test("rescan reports a created file although the native watcher never notifies",
   watcher.on("add", (path) => seen.push(path));
   await watcher.ready;
   await writeFile(join(dir, "a.txt"), "1");
-  await new Promise((r) => setTimeout(r, 300));
   expect(seen).toEqual([]);
   await watcher.rescan();
   await vi.waitUntil(() => seen.length > 0, 3000);

@@ -168,7 +168,11 @@ may not work at all. The watcher then stays silent while files change. Options, 
 ```ts
 const watcher = watch("src", { ignoreInitial: true });
 watcher.on("error", (error) => console.error(error));
-setInterval(() => void watcher.rescan(), 2000);
+const timer = setInterval(() => void watcher.rescan(), 2000);
+
+// when you are done
+clearInterval(timer);
+await watcher.close();
 ```
 
 `rescan()` resolves once the directories have been read. `add` and `change` are reported after the usual wait

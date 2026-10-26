@@ -100,7 +100,14 @@ function matcher(ignored: Ignored | undefined): Matcher {
     return ignored.length >= 2
       ? { byPath: () => false, byStats: (path, stats) => ignored(path, stats) }
       : { byPath: (path) => ignored(path) };
-  if (ignored instanceof RegExp) return { byPath: (path) => ignored.test(slashed(path)) };
+  if (ignored instanceof RegExp)
+    return {
+      byPath: (path) => {
+        // with the g or y flag, test() resumes from the last match, so a second path would not be tested from its start
+        ignored.lastIndex = 0;
+        return ignored.test(slashed(path));
+      },
+    };
   if (typeof ignored === "string") {
     const target = resolve(ignored);
     return { byPath: (path) => within(target, path) };
@@ -325,7 +332,14 @@ export class FSWatcher extends EventEmitter<Events> {
       return;
     }
 
-    if (!this.#entries.has(root) && this.#ignored.byStats?.(root, info)) return;
+    if (!this.#entries.has(root) && this.#ignored.byStats?.(root, info)) {
+      // watched all the same, so that the path is read again when its stats may have changed
+      this.#probes.delete(root);
+      this.#kinds.set(root, info.isDirectory() ? "dir" : "file");
+      this.#ensureNative(info.isDirectory() ? root : dirname(root));
+      if (previousProbe) this.#release(previousProbe);
+      return;
+    }
     this.#probes.delete(root);
     if (info.isDirectory()) {
       this.#kinds.set(root, "dir");

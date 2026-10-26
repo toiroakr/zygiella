@@ -549,6 +549,16 @@ describe("ignored receives stats", () => {
     expect(seen).toEqual([["add", join(dir, "a.txt")]]);
   });
 
+  test("a RegExp with the g flag skips every matching path, not every other one", async () => {
+    await writeFile(join(dir, "a.log"), "1");
+    await writeFile(join(dir, "b.log"), "1");
+    await writeFile(join(dir, "c.log"), "1");
+    const { seen } = await start(dir, { ignoreInitial: false, ignored: /\.log$/g });
+    expect(seen.map(([, path]) => path)).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/\.log$/)]),
+    );
+  });
+
   test("a function given stats can skip files of one kind while directories are still descended into", async () => {
     await mkdir(join(dir, "sub"));
     await writeFile(join(dir, "sub", "a.js"), "1");
@@ -620,6 +630,17 @@ describe("ignored receives stats", () => {
     });
     await writeFile(file, "12");
     await w.rescan();
+    await until(() => seen.length > 0);
+    expect(seen).toEqual([["add", file]]);
+  });
+
+  test("a watched file whose stats match is picked up without rescan once they stop matching", async () => {
+    const file = join(dir, "a.txt");
+    await writeFile(file, "123456789");
+    const { seen } = await start(file, {
+      ignored: (_path, stats) => stats?.isFile() === true && stats.size > 5,
+    });
+    await writeFile(file, "12");
     await until(() => seen.length > 0);
     expect(seen).toEqual([["add", file]]);
   });
