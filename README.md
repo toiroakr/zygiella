@@ -101,7 +101,7 @@ A path that cannot be read because of permissions is not in `missing`; it is emi
 | ------------------------ | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ignoreInitial`          | `false`   | Do not report what already exists when a path is watched.                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `depth`                  | unlimited | How many directory levels below a watched directory are descended into. `0` reports the directory's own children (including new subdirectories) only.                                                                                                                                                                                                                                                                                                                  |
-| `ignored`                | none      | A `RegExp`, a function `(path, stats?) => boolean`, a path (it and everything below it), or an array of those. A skipped directory is not descended into. See [ignored](#ignored). |
+| `ignored`                | none      | A `RegExp`, a function `(path, stats?) => boolean`, a path (it and everything below it), or an array of those. A skipped directory is not descended into. See [ignored](#ignored).                                                                                                                                                                                                                                                                                     |
 | `followSymlinks`         | `true`    | Descend into directories that a symbolic link points at. A link to a directory that is already on the way down (for example a link to an ancestor) is reported but not descended into. `false` watches a link as itself: it is reported as `add`, and pointing it somewhere else is reported as `change`.                                                                                                                                                              |
 | `atomic`                 | `true`    | `true` or a number of ms (`true` is 100). An `unlink` is held back for that long, and a file created again at the same path within it is reported as one `change`, as editors that save by deleting and creating the file produce. Also ignores editor temporary files (`.swp`, `.swx`, a trailing `~`, Sublime's `.subl*.tmp`). `false` reports a deleted file's `unlink` without the wait (an `add` is still reported after the usual 50 ms, or `awaitWriteFinish`). |
 | `awaitWriteFinish`       | `false`   | `true` or `{ stabilityThreshold, pollInterval }` in ms (defaults 2000 and 100). Holds `add` and `change` back until size and mtime stop changing.                                                                                                                                                                                                                                                                                                                      |
@@ -126,7 +126,7 @@ A path that cannot be read because of permissions is not in `missing`; it is emi
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `add(paths)`     | Start watching more paths. Returns the watcher.                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `unwatch(paths)` | Stop watching paths that were given to `watch()` or `add()`. Returns the watcher.                                                                                                                                                                                                                                                                                                                                                                       |
-| `rescan()`       | Read every watched path again now and report the difference. Returns a promise. See [Environments without native events](#environments-without-native-events). |
+| `rescan()`       | Read every watched path again now and report the difference. Returns a promise. See [Environments without native events](#environments-without-native-events).                                                                                                                                                                                                                                                                                          |
 | `close()`        | Stop watching. Takes effect when called: nothing is reported afterwards, even if you do not `await` it. Returns a promise that resolves once work in progress has finished.                                                                                                                                                                                                                                                                             |
 | `ready`          | A promise that resolves to `{ missing }` once the paths last given to `watch()` or `add()` are being watched. `missing` lists the paths of that call that did not exist. `await watcher.add(p).ready` is safe to change `p` right after. A change made between `watch()` and `ready` can be missed, or reported as an initial `add` (with `ignoreInitial: false`) or as a normal event, depending on timing, so await `ready` before changing anything. |
 
@@ -135,19 +135,23 @@ A path that cannot be read because of permissions is not in `missing`; it is emi
 A `RegExp` is tested against the absolute path with `/` as the separator, so on Windows `C:\work\.git\config` is
 tested as `C:/work/.git/config`. A function and a string get the path as it is, with the platform's separator.
 
-A function that declares two parameters is called once per path with the path and its `fs.Stats`. A function that
+A function that declares two parameters (its `length` is 2 or more, so a default or rest parameter does not count) is called once per path with the path and its `fs.Stats`. A function that
 declares one parameter or none is called with the path alone, and no `stat` is made for it. A path that a `RegExp`,
 a string or such a function already skips is not `stat`ed either. Declaring `stats` is how to descend into every
 directory and still skip some files, which the path alone cannot tell apart:
 
 ```ts
-watch("src", { ignored: (path, stats) => stats?.isFile() && !path.endsWith(".js") });
+watch("src", { ignored: (path, stats) => stats?.isFile() === true && !path.endsWith(".js") });
 ```
 
 For a symbolic link, `stats` describes what the path is reported as: the target with `followSymlinks` (the
 default), the link itself with `followSymlinks: false`. A link that points at nothing is not reported with
 `followSymlinks`, and the function is not called for it. A function that declares `stats` is also not called for a
 watched path that does not exist yet.
+
+A path that is already being watched and then starts to be skipped because of its `stats` (for example, a size
+limit) is not reported as `unlink`, and nothing is reported for it while it is skipped. When it stops being
+skipped, it is reported as `change` if it differs from what was last seen.
 
 ## Environments without native events
 

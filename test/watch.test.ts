@@ -597,6 +597,22 @@ describe("ignored receives stats", () => {
     expect(two.filter(([path]) => path !== dir)).toEqual([[join(dir, "a.txt"), true]]);
   });
 
+  test("a file that a stats condition starts to skip is not reported as removed, and is reported as changed once it is not skipped again", async () => {
+    const file = join(dir, "a.txt");
+    await writeFile(file, "1");
+    const { w, seen } = await start(dir, {
+      ignored: (_path, stats) => stats?.isFile() === true && stats.size > 5,
+    });
+    await writeFile(file, "123456789");
+    await w.rescan();
+    await settle();
+    expect(seen).toEqual([]);
+    await writeFile(file, "12");
+    await w.rescan();
+    await until(() => seen.length > 0);
+    expect(seen).toEqual([["change", file]]);
+  });
+
   test("a link is given the stats of what it points at", async () => {
     await mkdir(join(dir, "sub"));
     const link = join(dir, "link");

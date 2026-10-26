@@ -18,7 +18,7 @@ export interface WatchOptions {
   depth?: number;
   /**
    * Paths to skip. A skipped directory is not descended into. Receives absolute paths; a RegExp is tested against
-   * the path with `/` as the separator. A function that declares two parameters is called once, with the
+   * the path with `/` as the separator. A function that declares two parameters (`length` 2 or more) is called once, with the
    * `fs.Stats` of the path (of the target, for a link); any other function is called with the path alone.
    */
   ignored?: Ignored;
@@ -398,7 +398,11 @@ export class FSWatcher extends EventEmitter<Events> {
           }
         }
         if (own.isSymbolicLink() || !info.isDirectory()) this.#denied.delete(path);
-        if (this.#ignored.byStats?.(path, info)) return;
+        if (this.#ignored.byStats?.(path, info)) {
+          // a tracked path stays tracked, so a condition on size or mtime is not reported as the file being removed
+          if (this.#entries.has(path)) seen.add(path);
+          return;
+        }
         seen.add(path);
         await this.#visit(
           path,
