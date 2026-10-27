@@ -213,6 +213,13 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     for (const key of natives.unwatched()) if (within(path, key)) natives.release(key);
     const parent = dirname(path);
     if (parent !== path) natives.release(parent);
+    // what stays tracked below the path may have been reported by the tree watch that is closed now, as the directory
+    // behind a link that was a root of its own: it needs a watch of its own again unless another tree reports it
+    // (a directory whose watch failed stays listed and is not tried again by this)
+    const failed = new Set(natives.unwatched());
+    for (const [dir, ancestry] of ancestries)
+      if (within(path, dir) && depthLeft.has(dir) && !failed.has(dir) && !physical(dir, ancestry))
+        natives.ensure(dir);
   }
 
   /**

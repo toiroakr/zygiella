@@ -285,6 +285,15 @@ describe.skipIf(!recursiveHere)("on macOS", () => {
     ).toEqual([]);
   });
 
+  test("a followed link that stops being a root of its own keeps being watched through the root above it", async () => {
+    await symlink(outside, join(dir, "link"));
+    const { w, seen } = await start(dir);
+    await w.add(join(dir, "link")).ready;
+    w.unwatch(join(dir, "link"));
+    const file = join(dir, "link", "a.txt");
+    await writeUntil(join(outside, "a.txt"), () => seen.some(([, path]) => path === file));
+  });
+
   test("errors of a root that was unwatched do not count against it when it is added again", async () => {
     // a watched file directly in the root keeps the directory in use, so unwatching the root cannot rely on releasing it
     const file = join(dir, "a.txt");
