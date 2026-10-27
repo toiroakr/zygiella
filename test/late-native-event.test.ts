@@ -107,12 +107,19 @@ vi.mock("node:fs/promises", async (importOriginal) => {
         native.failPath = "";
         throw Object.assign(new Error(native.failCode), { code: native.failCode });
       }
-      const info = await (read as (...args: unknown[]) => Promise<{ size: number }>)(path, ...rest);
+      let info: { size: number } | undefined;
+      let failure: unknown;
+      try {
+        info = await (read as (...args: unknown[]) => Promise<{ size: number }>)(path, ...rest);
+      } catch (error) {
+        failure = error;
+      }
       if (!refresh && path.startsWith(native.root)) {
         native.reads.push(path);
-        if (path === native.watched) native.sizesRead.push(info.size);
+        if (info && path === native.watched) native.sizesRead.push(info.size);
         await native.pause("stat", path, stack);
       }
+      if (!info) throw failure;
       return info;
     }) as typeof actual.stat;
   const pausing = (async (path: string, ...rest: unknown[]) => {
@@ -186,7 +193,7 @@ async function until(predicate: () => boolean, ms = 3000): Promise<void> {
 async function watching(
   target: string | string[],
   file: string,
-  options: { followSymlinks?: boolean } = {},
+  options: { followSymlinks?: boolean; atomic?: boolean } = {},
 ) {
   native.watched = file;
   const w = watch(target, { ignoreInitial: true, ...options });
@@ -368,6 +375,25 @@ describe("a read of the file that completes after the change was reported", () =
     await until(() => seen.length > 0);
 
     expect(seen).toEqual([["unlink", file]]);
+  });
+
+  test("keeps a file that became a watched root while the result of its failed read was on the way", async () => {
+    const a = join(dir, "a.txt");
+    const b = join(dir, "b.txt");
+    await writeFile(a, "1");
+    await writeFile(b, "1");
+    const { w, seen } = await watching(dir, b, { atomic: false });
+
+    await rm(b);
+    native.hold("stat", false, b);
+    native.deliver();
+    await until(() => native.held);
+    await writeFile(b, "1");
+    await w.add(b).ready;
+    native.open();
+    await w.rescan();
+
+    expect(seen).toEqual([]);
   });
 
   test.skipIf(process.platform === "win32")(
