@@ -40,7 +40,7 @@ all three.
 
 `src/index.ts` holds `watch()`, which keeps the state of one watcher in a closure and returns an `EventEmitter` (`FSWatcher` is
 only a type). The parts that own their own state or have none are in their own files: `match.ts` (the `ignored` matcher, no
-state), `snapshot.ts` (validating and seeding a snapshot, no state), `native.ts` (the `fs.watch` handles and the unwatched
+state), `snapshot.ts` (validating and seeding a snapshot, no state), `options.ts` (the defaults and validation of the options, no state), `native.ts` (the `fs.watch` handles and the unwatched
 set), `pending.ts` (add / change waiting to settle and unlinks held for `atomic`) and `types.ts`. The tests in `test/` run against the real file system.
 
 - Each directory that is descended into has its own `fs.watch`. Native events are not trusted for their type or
