@@ -480,7 +480,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
         if (seen.has(path) || uninspectable.has(path) || watchedRoots.has(path)) return;
         if (!covered() || !children.get(dir)?.has(path)) return;
         // the siblings may have taken long: a file that was missing at its read can be back and reported since then
-        if ((await examine(path)) || closed || uninspectable.has(path)) return;
+        if ((await examine(path)) || closed) return;
+        // not `uninspectable`: the listing did not have the name, and a directory that is being deleted can refuse a read
         remove(path, true, undefined, mode !== "seed");
       }),
     );
