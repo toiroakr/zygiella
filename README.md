@@ -47,15 +47,14 @@ await watcher.close();
 1. Change the import from `chokidar` to `zygiella`. What `watch(paths, options)` returns has the same method
    names, event names and argument shapes as chokidar's watcher (`on`, `off`, `once`, `add`, `unwatch`, `close`,
    the events `add`, `addDir`, `change`, `unlink`, `unlinkDir`, `all`, `ready`, `error`), except that `ready`
-   also passes `{ missing }` where chokidar passes nothing, so code that only receives a watcher from `watch()`
-   keeps working:
+   passes `{ missing }` where chokidar passes nothing, and `add`, `addDir` and `change` listeners never receive
+   `stats`, so code that only receives a watcher from `watch()` and does not read those arguments keeps working:
 
    ```ts
    import { watch } from "zygiella"; // was: import { watch } from "chokidar";
 
    const watcher = watch("src");
    watcher.on("change", (path) => console.log(path));
-   await watcher.close();
    ```
 
    `FSWatcher` is not a class here, only a TypeScript type. Importing it as a value fails when the module loads,
