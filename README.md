@@ -46,8 +46,9 @@ await watcher.close();
 
 1. Change the import from `chokidar` to `zygiella`. What `watch(paths, options)` returns has the same method
    names, event names and argument shapes as chokidar's watcher (`on`, `off`, `once`, `add`, `unwatch`, `close`,
-   the events `add`, `addDir`, `change`, `unlink`, `unlinkDir`, `all`, `ready`, `error`), so code that only
-   receives a watcher from `watch()` keeps working:
+   the events `add`, `addDir`, `change`, `unlink`, `unlinkDir`, `all`, `ready`, `error`), except that `ready`
+   also passes `{ missing }` where chokidar passes nothing, so code that only receives a watcher from `watch()`
+   keeps working:
 
    ```ts
    import { watch } from "zygiella"; // was: import { watch } from "chokidar";

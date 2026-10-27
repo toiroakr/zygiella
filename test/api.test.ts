@@ -43,6 +43,7 @@ test("add and unwatch return the watcher so calls can be chained", () => {
 
 test("ready is a promise and unwatched is a list, as properties", async () => {
   watcher = watch(dir);
+  expect(watcher.ready).toBeInstanceOf(Promise);
   expect(await watcher.ready).toEqual({ missing: [] });
   expect(watcher.unwatched).toEqual([]);
 });
