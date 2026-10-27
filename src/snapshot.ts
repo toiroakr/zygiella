@@ -45,6 +45,12 @@ export function seedEntries(
       if (dirname(p) === p) return undefined;
     }
   };
+  const ignoredAbove = (path: string): boolean => {
+    for (let p = path; ; p = dirname(p)) {
+      if (ignored(p)) return true;
+      if (rootSet.has(p) || dirname(p) === p) return false;
+    }
+  };
   const kept = new Set<string>();
   const seeded: SnapshotEntry[] = [];
   // shallow first, so that whether the parent was kept is known
@@ -57,12 +63,7 @@ export function seedEntries(
     // below the levels that are descended into now, so it is not scanned and would be reported as unlink
     if (entry.path.slice(root.length).split(sep).filter(Boolean).length > depth + 1) continue;
     // an ignored path, or one below an ignored directory, is not scanned: it would be reported as unlink
-    let skipped = false;
-    for (let path = entry.path; !skipped; path = dirname(path)) {
-      skipped = ignored(path);
-      if (rootSet.has(path) || dirname(path) === path) break;
-    }
-    if (skipped) continue;
+    if (ignoredAbove(entry.path)) continue;
     // below an entry that is missing, it can never be reached from its parent, and would stay in the baseline
     if (!rootSet.has(entry.path) && !kept.has(dirname(entry.path))) continue;
     if (entry.dir) kept.add(entry.path);

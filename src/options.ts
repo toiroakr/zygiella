@@ -18,6 +18,14 @@ export interface Settings {
   settle: { stabilityThreshold: number; pollInterval: number } | undefined;
 }
 
+const settleOf = (awf: WatchOptions["awaitWriteFinish"]): Settings["settle"] =>
+  awf
+    ? {
+        stabilityThreshold: (typeof awf === "object" && awf.stabilityThreshold) || 2000,
+        pollInterval: (typeof awf === "object" && awf.pollInterval) || 100,
+      }
+    : undefined;
+
 export function resolveOptions(options: WatchOptions): Settings {
   const atomic = options.atomic ?? true;
   const atomicMs = atomic === true ? ATOMIC_MS : atomic || 0;
@@ -31,7 +39,6 @@ export function resolveOptions(options: WatchOptions): Settings {
     throw new RangeError(
       `rescanInterval must be a number from 0 to ${MAX_TIMER_MS} ms, got ${String(rescanInterval)}`,
     );
-  const awf = options.awaitWriteFinish;
   return {
     atomicMs,
     ignored:
@@ -44,11 +51,6 @@ export function resolveOptions(options: WatchOptions): Settings {
     ignorePermissionErrors: options.ignorePermissionErrors ?? false,
     persistent: options.persistent ?? true,
     rescanInterval,
-    settle: awf
-      ? {
-          stabilityThreshold: (typeof awf === "object" && awf.stabilityThreshold) || 2000,
-          pollInterval: (typeof awf === "object" && awf.pollInterval) || 100,
-        }
-      : undefined,
+    settle: settleOf(options.awaitWriteFinish),
   };
 }

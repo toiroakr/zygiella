@@ -27,6 +27,11 @@ export type {
 } from "./types.ts";
 
 const READY_SETTLE_MS = 50;
+const differs = (previous: Entry, next: Entry): boolean =>
+  previous.mtimeMs !== next.mtimeMs ||
+  previous.size !== next.size ||
+  previous.ino !== next.ino ||
+  previous.link !== next.link;
 const isTrue = (): boolean => true;
 const isFalse = (): boolean => false;
 
@@ -153,21 +158,23 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   }
 
   function unwatch(paths: string | readonly string[]): FSWatcher {
-    for (const path of list(paths)) {
-      watchedRoots.delete(path);
-      missingAtStart.delete(path);
-      for (const key of denied) if (within(path, key)) denied.delete(key);
-      kinds.delete(path);
-      const probe = probes.get(path);
-      probes.delete(path);
-      remove(path, false, (key) => ![...watchedRoots].some((root) => within(root, key)));
-      if (probe) natives.release(probe);
-      // a directory whose watch failed has no entry, so remove never released it
-      for (const key of natives.unwatched()) if (within(path, key)) natives.release(key);
-      const parent = dirname(path);
-      if (parent !== path) natives.release(parent);
-    }
+    for (const path of list(paths)) forget(path);
     return watcher;
+  }
+
+  function forget(path: string): void {
+    watchedRoots.delete(path);
+    missingAtStart.delete(path);
+    for (const key of denied) if (within(path, key)) denied.delete(key);
+    kinds.delete(path);
+    const probe = probes.get(path);
+    probes.delete(path);
+    remove(path, false, (key) => ![...watchedRoots].some((root) => within(root, key)));
+    if (probe) natives.release(probe);
+    // a directory whose watch failed has no entry, so remove never released it
+    for (const key of natives.unwatched()) if (within(path, key)) natives.release(key);
+    const parent = dirname(path);
+    if (parent !== path) natives.release(parent);
   }
 
   /**
@@ -283,29 +290,39 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       return;
     }
 
-    if (!entries.has(root) && ignored.byStats?.(root, info)) {
-      // watched all the same, so that the path is read again when its stats may have changed
-      kinds.set(root, info.isDirectory() ? "dir" : "file");
-      // a directory has no entry to keep its watch while it is skipped, so the probe does, and unwatch() releases it
-      if (info.isDirectory()) probes.set(root, root);
-      else probes.delete(root);
-      natives.ensure(info.isDirectory() ? root : dirname(root));
-    } else {
-      probes.delete(root);
-      if (info.isDirectory()) {
-        kinds.set(root, "dir");
-        natives.ensure(root);
-        const real = await realpath(root).catch(() => root);
-        await visit(root, info, 0, mode, [], real);
-        await syncDir(root, maxDepth, mode, [real]);
-      } else {
-        kinds.set(root, "file");
-        natives.ensure(dirname(root));
-        await visit(root, info, 0, mode, [], link);
-      }
-    }
+    if (!entries.has(root) && ignored.byStats?.(root, info)) watchSkipped(root, info);
+    else await scanRoot(root, info, link, mode);
     if (previousProbe) natives.release(previousProbe);
     if (previousParent) natives.release(previousParent);
+  }
+
+  /** A root skipped by its stats is watched all the same, so that it is read again when its stats may have changed. */
+  function watchSkipped(root: string, info: Stats): void {
+    kinds.set(root, info.isDirectory() ? "dir" : "file");
+    // a directory has no entry to keep its watch while it is skipped, so the probe does, and unwatch() releases it
+    if (info.isDirectory()) probes.set(root, root);
+    else probes.delete(root);
+    natives.ensure(info.isDirectory() ? root : dirname(root));
+  }
+
+  async function scanRoot(
+    root: string,
+    info: Stats,
+    link: string | undefined,
+    mode: Mode,
+  ): Promise<void> {
+    probes.delete(root);
+    if (!info.isDirectory()) {
+      kinds.set(root, "file");
+      natives.ensure(dirname(root));
+      await visit(root, info, 0, mode, [], link);
+      return;
+    }
+    kinds.set(root, "dir");
+    natives.ensure(root);
+    const real = await realpath(root).catch(() => root);
+    await visit(root, info, 0, mode, [], real);
+    await syncDir(root, maxDepth, mode, [real]);
   }
 
   async function statRoot(
@@ -513,30 +530,34 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       previous = undefined;
     }
     if (!previous) {
-      if (next.dir) pending.flush(path);
-      // an unlink listener may have closed the watcher: the entry would be in the baseline without being reported
-      if (closed) return;
-      setEntry(path, next);
-      if (next.dir) {
-        if (mode !== "quiet") dispatch("addDir", path);
-      } else if (mode === "live" || pending.isHeld(path)) pending.announce("add", path);
-      else if (mode !== "quiet") dispatch("add", path);
-      if (next.dir && left > 0) await syncDir(path, left - 1, mode, ancestry);
+      await visitNew(path, next, left, mode, ancestry);
       return;
     }
     // a directory remembered from a snapshot has not been read yet
     if (next.dir && left > 0 && !depthLeft.has(path)) await syncDir(path, left - 1, mode, ancestry);
-    if (
-      !next.dir &&
-      (previous.mtimeMs !== next.mtimeMs ||
-        previous.size !== next.size ||
-        previous.ino !== next.ino ||
-        previous.link !== next.link)
-    ) {
+    if (!next.dir && differs(previous, next)) {
       setEntry(path, next);
       if (mode === "seed") dispatch("change", path);
       else if (mode !== "quiet") pending.announce("change", path, previous);
     }
+  }
+
+  async function visitNew(
+    path: string,
+    next: Entry,
+    left: number,
+    mode: Mode,
+    ancestry: readonly string[],
+  ): Promise<void> {
+    if (next.dir) pending.flush(path);
+    // an unlink listener may have closed the watcher: the entry would be in the baseline without being reported
+    if (closed) return;
+    setEntry(path, next);
+    if (next.dir) {
+      if (mode !== "quiet") dispatch("addDir", path);
+      if (left > 0) await syncDir(path, left - 1, mode, ancestry);
+    } else if (mode === "live" || pending.isHeld(path)) pending.announce("add", path);
+    else if (mode !== "quiet") dispatch("add", path);
   }
 
   function setEntry(path: string, entry: Entry): void {
