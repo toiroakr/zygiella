@@ -223,31 +223,34 @@ describe("a read of the file that completes after the change was reported", () =
     expect(w.snapshot().entries.find((entry) => entry.path === file)?.size).toBe(2);
   });
 
-  test("does not report the link target again when the read of it completes after the change was reported", async () => {
-    const link = join(dir, "link");
-    const replaceLink = async (target: string) => {
-      await symlink(target, `${link}.tmp`);
-      await rename(`${link}.tmp`, link);
-    };
-    await symlink(join(dir, "first"), link);
-    const { w, seen } = await watching(link, link, { followSymlinks: false });
+  test.skipIf(process.platform === "win32")(
+    "does not report the link target again when the read of it completes after the change was reported",
+    async () => {
+      const link = join(dir, "link");
+      const replaceLink = async (target: string) => {
+        await symlink(target, `${link}.tmp`);
+        await rename(`${link}.tmp`, link);
+      };
+      await symlink(join(dir, "first"), link);
+      const { w, seen } = await watching(link, link, { followSymlinks: false });
 
-    const linksBefore = native.linksRead.length;
-    await replaceLink(join(dir, "second"));
-    native.deliver();
-    await until(() => native.linksRead.length > linksBefore);
-    native.hold("readlink");
-    native.deliver();
-    await until(() => native.held);
-    await replaceLink(join(dir, "third"));
-    await until(() => seen.length > 0);
-    const reads = native.linksRead.length;
-    native.open();
-    await until(() => native.linksRead.length > reads || seen.length > 1);
+      const linksBefore = native.linksRead.length;
+      await replaceLink(join(dir, "second"));
+      native.deliver();
+      await until(() => native.linksRead.length > linksBefore);
+      native.hold("readlink");
+      native.deliver();
+      await until(() => native.held);
+      await replaceLink(join(dir, "third"));
+      await until(() => seen.length > 0);
+      const reads = native.linksRead.length;
+      native.open();
+      await until(() => native.linksRead.length > reads || seen.length > 1);
 
-    expect(seen).toEqual([["change", link]]);
-    expect(w.snapshot().entries.find((entry) => entry.path === link)?.link).toBe(
-      join(dir, "third"),
-    );
-  });
+      expect(seen).toEqual([["change", link]]);
+      expect(w.snapshot().entries.find((entry) => entry.path === link)?.link).toBe(
+        join(dir, "third"),
+      );
+    },
+  );
 });
