@@ -332,6 +332,23 @@ describe.skipIf(!recursiveHere)("on macOS", () => {
     expect(w.unwatched).toEqual([sub]);
   });
 
+  test("a directory of a watched file whose own watch hit a limit stays listed while a tree reports its directory", async () => {
+    const sub = join(dir, "sub");
+    const file = join(sub, "a.txt");
+    await mkdir(sub);
+    await writeFile(file, "0");
+    const { w, seen, errors } = await start(dir);
+    await w.add(file).ready;
+    native.made
+      .get(`dir:${sub}`)!
+      .emit("error", Object.assign(new Error("limit"), { code: "EMFILE" }));
+    await until(() => errors.length > 0);
+    // the tree of the root reports this, and that makes zygiella read the directory again
+    const other = join(sub, "other.txt");
+    await writeUntil(other, () => seen.some(([, path]) => path === other));
+    expect(w.unwatched).toEqual([sub]);
+  });
+
   test("errors of a root that was unwatched do not count against it when it is added again", async () => {
     // a watched file directly in the root keeps the directory in use, so unwatching the root cannot rely on releasing it
     const file = join(dir, "a.txt");

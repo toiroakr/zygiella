@@ -14,6 +14,10 @@ const gate = vi.hoisted(() => ({
   path: undefined as string | undefined,
   hold: undefined as Promise<void> | undefined,
   reached: false,
+  // the next lstat of this path answers at once with what it saw, and is held back before it returns
+  lstatPath: undefined as string | undefined,
+  lstatHold: undefined as Promise<void> | undefined,
+  lstatReached: false,
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -42,6 +46,23 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
     ...actual,
+    lstat: ((path: string, ...rest: unknown[]) => {
+      const seen = (actual.lstat as unknown as (...args: unknown[]) => Promise<unknown>)(
+        path,
+        ...rest,
+      );
+      if (gate.lstatHold && String(path) === gate.lstatPath) {
+        const hold = gate.lstatHold;
+        gate.lstatPath = undefined;
+        gate.lstatHold = undefined;
+        return seen.then(async (info) => {
+          gate.lstatReached = true;
+          await hold;
+          return info;
+        });
+      }
+      return seen;
+    }) as typeof actual.lstat,
     readdir: ((path: string, ...rest: unknown[]) => {
       reads.set(String(path), (reads.get(String(path)) ?? 0) + 1);
       const listed = (actual.readdir as unknown as (...args: unknown[]) => Promise<unknown>)(
@@ -90,6 +111,9 @@ beforeEach(async () => {
   gate.path = undefined;
   gate.hold = undefined;
   gate.reached = false;
+  gate.lstatPath = undefined;
+  gate.lstatHold = undefined;
+  gate.lstatReached = false;
 });
 
 afterEach(async () => {
@@ -223,7 +247,7 @@ describe("once the events of a directory with many entries have stopped", () => 
 });
 
 describe("a full read and a named entry read of the same large directory", () => {
-  test("an entry recorded while the directory was being read is not reported as removed", async () => {
+  test("an entry created while the directory was being read is reported, and not as removed", async () => {
     const { w, seen } = await start(dir);
     await quiet();
     let release!: () => void;
@@ -233,16 +257,38 @@ describe("a full read and a named entry read of the same large directory", () =>
     try {
       await until(() => gate.reached);
       await writeFile(join(big, "late"), "1");
-      await until(() =>
-        seen.some(([event, path]) => event === "add" && path === join(big, "late")),
-      );
     } finally {
       // close() in afterEach waits for the read that is held back
       release();
     }
-    // the removal pass of the full read has run when it resolves, and it reports at once without `atomic`
     await scan;
+    await until(() => seen.some(([event, path]) => event === "add" && path === join(big, "late")));
     expect(seen.filter(([event]) => event === "unlink")).toEqual([]);
+  });
+
+  test("a file removed while the directory was being read is reported as removed, and not added again", async () => {
+    const { w, seen } = await start(dir);
+    await quiet();
+    const file = join(big, "f7");
+    let release!: () => void;
+    gate.lstatPath = file;
+    gate.lstatHold = new Promise<void>((done) => (release = done));
+    const scan = w.rescan();
+    try {
+      await until(() => gate.lstatReached);
+      await rm(file);
+      // the read of the removal has to wait for the full read, which saw the file before it was removed
+    } finally {
+      release();
+    }
+    await scan;
+    const afterScan = reads.get(big) ?? 0;
+    await until(() => seen.some(([event, path]) => event === "unlink" && path === file));
+    // an add that was announced waits 50 ms before it is reported, and the audit that follows the events (1 s) is read
+    // after that
+    await until(() => (reads.get(big) ?? 0) > afterScan, 4000);
+    expect(seen.filter(([, path]) => path === file)).toEqual([["unlink", file]]);
+    expect(w.snapshot().entries.map((entry) => entry.path)).not.toContain(file);
   });
 });
 
