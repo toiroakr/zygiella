@@ -155,7 +155,9 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   /**
    * Reads again when `settled` recorded the path, or `remove` forgot it, while the read was in flight: the result
    * may be older than the entry and would put it back. Dropping it instead could lose a newer state whose native
-   * event was merged into the one that started this read.
+   * event was merged into the one that started this read. The mark is not kept until `visit()` uses the result:
+   * nothing but promise callbacks sits between the two, so `settled()`, which runs from a timer or an I/O callback,
+   * cannot run in between.
    */
   async function unsettled<T>(path: string, read: () => Promise<T>): Promise<T> {
     for (;;) {
