@@ -25,6 +25,7 @@ const native = vi.hoisted(() => ({
   holdFrom: "",
   holdEarly: false,
   failPath: "",
+  failCode: "ENOENT",
   refreshGate: Promise.resolve(),
   releaseRefresh: () => {},
   holdNext: false,
@@ -61,8 +62,9 @@ const native = vi.hoisted(() => ({
     native.hold("stat", false, path);
     native.holdEarly = true;
   },
-  failNext(path: string) {
+  failNext(path: string, code = "ENOENT") {
     native.failPath = path;
+    native.failCode = code;
   },
   async pause(kind: "stat" | "readlink", path: string, stack: string) {
     if (!native.holdNext || native.holdKind !== kind) return;
@@ -103,7 +105,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       if (native.holdEarly && !refresh) await native.pause("stat", path, stack);
       if (path === native.failPath && !refresh) {
         native.failPath = "";
-        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        throw Object.assign(new Error(native.failCode), { code: native.failCode });
       }
       const info = await (read as (...args: unknown[]) => Promise<{ size: number }>)(path, ...rest);
       if (!refresh && path.startsWith(native.root)) {
@@ -157,6 +159,7 @@ beforeEach(async () => {
   native.holdFrom = "";
   native.holdEarly = false;
   native.failPath = "";
+  native.failCode = "ENOENT";
   native.holdNext = false;
   native.rejectHeld = false;
   native.held = false;
@@ -351,6 +354,20 @@ describe("a read of the file that completes after the change was reported", () =
     native.open();
     await until(() => seen.length >= 3);
     expect(seen.map(([event]) => event)).toEqual(["unlink", "unlink", "unlink"]);
+  });
+
+  test("reports a file that is gone as removed when the second look at it fails with a permission error", async () => {
+    const file = join(dir, "a.txt");
+    await writeFile(file, "1");
+    const { w, seen } = await watching(dir, file);
+    w.on("error", () => {});
+
+    await rm(file);
+    native.failNext(file, "EPERM");
+    native.deliver();
+    await until(() => seen.length > 0);
+
+    expect(seen).toEqual([["unlink", file]]);
   });
 
   test.skipIf(process.platform === "win32")(
