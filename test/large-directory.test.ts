@@ -270,6 +270,7 @@ describe("a full read and a named entry read of the same large directory", () =>
     const { w, seen } = await start(dir);
     await quiet();
     const file = join(big, "f7");
+    const readsBefore = reads.get(big) ?? 0;
     let release!: () => void;
     gate.lstatPath = file;
     gate.lstatHold = new Promise<void>((done) => (release = done));
@@ -282,11 +283,10 @@ describe("a full read and a named entry read of the same large directory", () =>
       release();
     }
     await scan;
-    const afterScan = reads.get(big) ?? 0;
     await until(() => seen.some(([event, path]) => event === "unlink" && path === file));
     // an add that was announced waits 50 ms before it is reported, and the audit that follows the events (1 s) is read
-    // after that
-    await until(() => (reads.get(big) ?? 0) > afterScan, 4000);
+    // after that: the full read and the audit are two reads, in whichever order the rescan() saw them
+    await until(() => (reads.get(big) ?? 0) >= readsBefore + 2, 4000);
     expect(seen.filter(([, path]) => path === file)).toEqual([["unlink", file]]);
     expect(w.snapshot().entries.map((entry) => entry.path)).not.toContain(file);
   });
