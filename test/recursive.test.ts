@@ -16,6 +16,7 @@ const native = vi.hoisted(() => ({
   closed: [] as string[],
   failTree: false,
   fail: new Set<string>(),
+  failTreeFor: new Set<string>(),
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -31,6 +32,8 @@ vi.mock("node:fs", async (importOriginal) => {
         });
       if (!recursive && native.fail.has(String(path)))
         throw Object.assign(new Error("ENOSPC: cannot watch"), { code: "ENOSPC" });
+      if (recursive && native.failTreeFor.has(String(path)))
+        throw Object.assign(new Error("EMFILE: too many open files, watch"), { code: "EMFILE" });
       if (recursive && native.failTree)
         throw Object.assign(new Error("EMFILE: too many open files, watch"), { code: "EMFILE" });
       const watcher = (
@@ -72,6 +75,7 @@ beforeEach(async () => {
   native.unsupported = false;
   native.failTree = false;
   native.fail.clear();
+  native.failTreeFor.clear();
 });
 
 afterEach(async () => {
@@ -212,6 +216,48 @@ describe.skipIf(!recursiveHere)("on macOS", () => {
     native.fail.clear();
     await w.rescan();
     expect(w.unwatched).toEqual([]);
+  });
+
+  test("a watched file below a covered directory keeps reporting after the tree that covered it is unwatched", async () => {
+    await mkdir(join(dir, "sub"));
+    const file = join(dir, "sub", "a.txt");
+    await writeFile(file, "0");
+    const { w, seen } = await start(dir);
+    await w.add(file).ready;
+    await w.rescan();
+    w.unwatch(dir);
+    await writeUntil(file, () => seen.some(([, path]) => path === file));
+  });
+
+  test("a scan that a tree watch asked for does not let the other trees try again after a limit", async () => {
+    const other = join(dir, "other");
+    await mkdir(other);
+    await mkdir(join(dir, "main"));
+    const main = join(dir, "main");
+    const { seen, errors } = await start([main, other]);
+    native.made
+      .get(`tree:${other}`)!
+      .emit("error", Object.assign(new Error("limit"), { code: "EMFILE" }));
+    await until(() => errors.length > 0);
+    // a tree watch that reports something without a place makes zygiella read everything again
+    (native.made.get(`tree:${main}`)! as unknown as { emit: (...args: unknown[]) => boolean }).emit(
+      "change",
+      "rename",
+      null,
+    );
+    await writeUntil(join(main, "a.txt"), () =>
+      seen.some(([, path]) => path === join(main, "a.txt")),
+    );
+    expect(native.calls.filter((call) => call.recursive && call.path === other)).toHaveLength(1);
+  });
+
+  test("a followed link that is a root of its own and whose tree watch failed keeps its own watch", async () => {
+    await symlink(outside, join(dir, "link"));
+    native.failTreeFor.add(join(dir, "link"));
+    const { seen } = await start([dir, join(dir, "link")]);
+    await writeUntil(join(outside, "a.txt"), () =>
+      seen.some(([, path]) => path === join(dir, "link", "a.txt")),
+    );
   });
 
   test("unwatch() closes the recursive watch", async () => {

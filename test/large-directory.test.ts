@@ -49,8 +49,9 @@ vi.mock("node:fs/promises", async (importOriginal) => {
         ...rest,
       );
       if (gate.hold && String(path) === gate.path) {
-        gate.reached = true;
         return listed.then(async (names) => {
+          // the directory is listed now, so what is created from here on is not in this list
+          gate.reached = true;
           await gate.hold;
           return names;
         });

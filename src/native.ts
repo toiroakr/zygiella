@@ -1,7 +1,6 @@
 import { watch as nativeWatch, type FSWatcher as NativeWatcher } from "node:fs";
 import { stat } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { within } from "./match.ts";
 
 export const VANISHED = new Set(["ENOENT", "ENOTDIR"]);
 export const DENIED = new Set(["EACCES", "EPERM"]);
@@ -34,10 +33,13 @@ export interface NativeWatches {
    * case the caller watches each directory with `ensure`.
    */
   ensureTree(root: string): boolean;
-  /** Whether a tree watch already reports what happens in `dir`. */
-  covers(dir: string): boolean;
-  /** `dir` is reported by a tree watch from now on: it is no longer listed as unwatched and needs no watch of its own. */
-  covered(dir: string): void;
+  /** Whether `root` is watched with a tree watch. */
+  hasTree(root: string): boolean;
+  /**
+   * A tree watch reports `dir` from now on, so it is no longer listed as unwatched. Its own watch is closed too unless
+   * `keep` says something else (a watched file, a path that does not exist yet) is waited for through it.
+   */
+  covered(dir: string, keep: boolean): void;
   /** Lets `ensure` and `ensureTree` try again where a limit was hit; only `rescan()` does this. */
   retry(): void;
   release(dir: string): void;
@@ -145,13 +147,14 @@ export function nativeWatches({
         return false;
       }
     },
-    covered(dir) {
+    covered(dir, keep) {
       unwatched.delete(dir);
+      if (keep) return;
       watchers.get(dir)?.close();
       watchers.delete(dir);
     },
     retry: () => blocked.clear(),
-    covers: (dir) => [...trees.keys()].some((root) => within(root, dir)),
+    hasTree: (root) => trees.has(root),
     release(dir) {
       if (needed(dir)) return;
       unwatched.delete(dir);

@@ -109,6 +109,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   const queues = new Map<string, { dirty: boolean; done: Promise<void> }>();
   const denied = new Set<string>();
   const missingAtStart = new Set<string>();
+  let retryLimits = false;
   const audits = new Map<string, NodeJS.Timeout>();
   /** For each directory a full read is going through: the paths a named entry read recorded meanwhile. */
   const scanning = new Map<string, Set<string>>();
@@ -120,7 +121,9 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     persistent,
     needed,
     onChange: onNative,
-    onLost: () => void rescan(),
+    onLost: () => {
+      if (!closed) void serial("rescan", () => rescanOnce());
+    },
     onError: fail,
   });
   const pending = pendingEvents({
@@ -217,13 +220,16 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
    */
   async function rescan(): Promise<void> {
     if (closed) return;
+    retryLimits = true;
     // a call made while a rescan runs makes it run once more afterwards, so two rescans never read at the same time
     await serial("rescan", () => rescanOnce());
   }
 
   async function rescanOnce(): Promise<void> {
-    // a limit that stopped a watch may be gone by now
-    natives.retry();
+    // a limit that stopped a watch may be gone by now, but only a call of rescan() lets the watches try again, not the
+    // read that a tree watch asks for after it lost track
+    if (retryLimits) natives.retry();
+    retryLimits = false;
     await Promise.all(
       [...watchedRoots].map((root) => serial(`root:${root}`, () => syncRoot(root, "live"))),
     );
@@ -458,7 +464,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     // attach the watcher before reading, so nothing that changes during the scan is lost
     depthLeft.set(dir, left);
     ancestries.set(dir, ancestry);
-    if (natives.covers(dir) && physical(dir, ancestry)) natives.covered(dir);
+    if (physical(dir, ancestry)) natives.covered(dir, waitedFor(dir));
     else natives.ensure(dir);
     const names = await readdir(dir).catch((error: NodeJS.ErrnoException) => {
       fail(error, dir);
@@ -489,12 +495,24 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   }
 
   /**
-   * Whether `dir` lies below a watched root with no link on the way: its real path is the root's real path followed by
-   * the same names. A tree watch reports what happens there, and does not report it behind a link.
+   * Whether a tree watch reports `dir`: it lies below a root that has one, with no link on the way, so that its real
+   * path is the real path of the root followed by the same names. It is not reported behind a link, nor by the tree of
+   * another root than the one the directory was reached from.
    */
   function physical(dir: string, ancestry: readonly string[]): boolean {
     return [...watchedRoots].some(
-      (root) => within(root, dir) && join(ancestry[0]!, relative(root, dir)) === ancestry.at(-1),
+      (root) =>
+        natives.hasTree(root) &&
+        within(root, dir) &&
+        join(ancestry[0]!, relative(root, dir)) === ancestry.at(-1),
+    );
+  }
+
+  /** A watched file, or a path that does not exist yet, depends on the watch of `dir`. */
+  function waitedFor(dir: string): boolean {
+    return (
+      [...probes.values()].includes(dir) ||
+      [...watchedRoots].some((root) => kinds.get(root) === "file" && dirname(root) === dir)
     );
   }
 

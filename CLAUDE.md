@@ -44,9 +44,9 @@ state), `snapshot.ts` (validating and seeding a snapshot, no state), `options.ts
 set), `pending.ts` (add / change waiting to settle and unlinks held for `atomic`) and `types.ts`. The tests in `test/` run against the real file system.
 
 - Each directory that is descended into has its own `fs.watch`, except on macOS, where `natives.ensureTree` watches a
-  root and everything below it with one `recursive: true` watch (not with a finite `depth`). `covers` says whether a
-  tree watch reports a directory, and `physical` in `index.ts` whether it can: a directory behind a followed link is
-  not under the tree physically, so it keeps its own watch. A tree watch that is not available or fails to open
+  root and everything below it with one `recursive: true` watch (not with a finite `depth`). `hasTree` says whether a root has one, and `physical` in `index.ts` whether it reports a directory: a directory
+  behind a followed link is not under the tree physically, so it keeps its own watch (as does the directory of a
+  watched file or of a path that does not exist yet, see `waitedFor`). A tree watch that is not available or fails to open
   falls back to one watch per directory. Native events are not trusted for their type: every event (except in a large directory, below) re-reads the
   directory and diffs it against a snapshot (`entries`), and the diff produces the reports. This absorbs coalesced
   and duplicated events on every platform. Only in a directory with more than `LARGE_DIRECTORY` entries is the name
@@ -55,8 +55,8 @@ set), `pending.ts` (add / change waiting to settle and unlinks held for `atomic`
   missing-path probes are synced too), which repairs an event the OS lost when others of that directory arrived.
   `isLarge` counts tracked entries, so entries under `ignored` do not count. A full read and a named read of one
   directory run in different queues; `scanning` makes the full read keep what a named read recorded meanwhile.
-- A native watcher error is retried by one re-sync of its directory, except `EMFILE` / `ENOSPC` and the fourth error
-  in a row without an event (`native.ts`); a re-watch after `EMFILE` on macOS made libuv rebuild its one stream for
+- A native watcher error is retried by one re-sync of its directory (a read of everything for a tree watch), except `EMFILE` / `ENOSPC` and the fourth error
+  in a row without an event (`native.ts`), after which only `rescan()` lets that path be watched again (`retry`); a re-watch after `EMFILE` on macOS made libuv rebuild its one stream for
   every handle, and the process never reached `ready`.
 - `Mode` decides whether a diff reports: `quiet` (remember only, for `ignoreInitial`), `initial` (report at
   once, it is what `ready` waits for) and `live` (report after a quiet period, see below).
