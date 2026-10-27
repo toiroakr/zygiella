@@ -24,8 +24,7 @@ const native = vi.hoisted(() => ({
   holdPath: "",
   holdFrom: "",
   holdEarly: false,
-  failPath: "",
-  failCode: "ENOENT",
+  fails: [] as Array<{ path: string; code: string }>,
   refreshGate: Promise.resolve(),
   releaseRefresh: () => {},
   holdNext: false,
@@ -62,9 +61,9 @@ const native = vi.hoisted(() => ({
     native.hold("stat", false, path);
     native.holdEarly = true;
   },
+  // each call makes one more read of `path` fail, in the order of the calls
   failNext(path: string, code = "ENOENT") {
-    native.failPath = path;
-    native.failCode = code;
+    native.fails.push({ path, code });
   },
   async pause(kind: "stat" | "readlink", path: string, stack: string) {
     if (!native.holdNext || native.holdKind !== kind) return;
@@ -103,9 +102,11 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       const refresh = isRefresh(path, stack);
       if (refresh) await native.refreshGate;
       if (native.holdEarly && !refresh) await native.pause("stat", path, stack);
-      if (path === native.failPath && !refresh) {
-        native.failPath = "";
-        throw Object.assign(new Error(native.failCode), { code: native.failCode });
+      const failing = refresh ? -1 : native.fails.findIndex((fail) => fail.path === path);
+      if (failing >= 0) {
+        const { code } = native.fails[failing]!;
+        native.fails.splice(failing, 1);
+        throw Object.assign(new Error(code), { code });
       }
       let info: { size: number } | undefined;
       let failure: unknown;
@@ -165,8 +166,7 @@ beforeEach(async () => {
   native.holdPath = "";
   native.holdFrom = "";
   native.holdEarly = false;
-  native.failPath = "";
-  native.failCode = "ENOENT";
+  native.fails = [];
   native.holdNext = false;
   native.rejectHeld = false;
   native.held = false;
@@ -391,6 +391,20 @@ describe("a read of the file that completes after the change was reported", () =
     await writeFile(b, "1");
     await w.add(b).ready;
     native.open();
+    await w.rescan();
+
+    expect(seen).toEqual([]);
+  });
+
+  test("keeps a name the listing had when its second look is refused after the first one found it missing", async () => {
+    const file = join(dir, "a.txt");
+    await writeFile(file, "1");
+    const { w, seen } = await watching(dir, file, { atomic: false });
+    w.on("error", () => {});
+
+    native.failNext(file, "ENOENT");
+    native.failNext(file, "EPERM");
+    native.deliver();
     await w.rescan();
 
     expect(seen).toEqual([]);
