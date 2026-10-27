@@ -1,8 +1,9 @@
 # zygiella
 
 A dependency-free file watcher for Node.js, built on `fs.watch`. It covers the part of the
-[chokidar](https://github.com/paulmillr/chokidar) API that most tools actually use, so replacing it is
-usually a one-line change to the import.
+[chokidar](https://github.com/paulmillr/chokidar) API that most tools actually use, so replacing it usually
+means changing the import and, if you construct or test for `FSWatcher` yourself, that code too (see
+[Migrating from chokidar](#migrating-from-chokidar)).
 
 **Requires Node.js 22.18 or later.**
 
@@ -43,8 +44,48 @@ await watcher.close();
 
 ## Migrating from chokidar
 
-1. Change the import from `chokidar` to `zygiella`. `watch(paths, options)` and the `FSWatcher` methods and
-   events listed below keep their names and shapes.
+1. Change the import from `chokidar` to `zygiella`. What `watch(paths, options)` returns has the same method
+   names, event names and argument shapes as chokidar's watcher (`on`, `off`, `once`, `add`, `unwatch`, `close`,
+   the events `add`, `addDir`, `change`, `unlink`, `unlinkDir`, `all`, `ready`, `error`), except that `ready`
+   passes `{ missing }` where chokidar passes nothing, and `add`, `addDir` and `change` listeners never receive
+   `stats`, so code that only receives a watcher from `watch()` and does not read those arguments keeps working:
+
+   ```ts
+   import { watch } from "zygiella"; // was: import { watch } from "chokidar";
+
+   const watcher = watch("src");
+   watcher.on("change", (path) => console.log(path));
+   ```
+
+   `FSWatcher` is not a class here, only a TypeScript type. Importing it as a value fails when the module loads,
+   so a type annotation needs a type-only import, even in code that never constructs a watcher:
+
+   ```ts
+   import { watch, type FSWatcher } from "zygiella"; // not: import { watch, FSWatcher } from "zygiella";
+   const watcher: FSWatcher = watch("src");
+   ```
+
+   The watcher is an `EventEmitter` created by `watch()`, so these two chokidar patterns also stop working:
+
+   ```ts
+   // chokidar
+   import { FSWatcher } from "chokidar";
+   const watcher = new FSWatcher({ ignoreInitial: true });
+   if (value instanceof FSWatcher) {
+   }
+   // zygiella: the first line already fails when the module loads:
+   // SyntaxError: The requested module 'zygiella' does not provide an export named 'FSWatcher'
+
+   // zygiella
+   import { EventEmitter } from "node:events";
+   import { watch, type FSWatcher } from "zygiella";
+   const watcher: FSWatcher = watch("src", { ignoreInitial: true });
+   if (value instanceof EventEmitter) {
+   } // the closest test; it also accepts other emitters
+   ```
+
+   Chokidar's `new FSWatcher(options)` followed by `watcher.add(paths)` becomes `watch(paths, options)`.
+
 2. Pass files and directories, not glob patterns. Expand a glob first, for example with `fs.glob`.
 3. Expect absolute paths in events and in what `ignored` receives, whatever form you passed in. A function in
    `ignored` receives `(path, stats?)`, but unlike chokidar a function that declares `stats` is called once, with it; a `RegExp` is tested against the path with `/` as the
@@ -81,7 +122,7 @@ the list of such paths, see [`watch()`](#watchpaths-options)), and a directory t
 
 ### `watch(paths, options?)`
 
-Returns an `FSWatcher`, which is an `EventEmitter`. `paths` is a path or an array of paths, each a file or a
+Returns an `FSWatcher`: an `EventEmitter` (not an instance of a class you can import) with the methods and properties below. `paths` is a path or an array of paths, each a file or a
 directory. A path that does not exist yet is not an error: no `error` is emitted, `ready` resolves as usual, and
 the path is watched from the moment it appears. The paths that did not exist when watching started are returned
 as `missing` in the value `ready` resolves to (absolute, in the order given), so you decide whether that is an
@@ -279,6 +320,7 @@ await watcher.close();
 
 ## Differences from chokidar
 
+- `FSWatcher` is a type only: `new FSWatcher(...)` and `instanceof FSWatcher` do not work, and a watcher is only created by `watch()`.
 - No glob patterns. `ignored` strings match a path and everything below it.
 - Paths are always absolute, with the platform's separator (`C:\work\src\a.ts` on Windows). A function or string
   in `ignored` receives them in that form; a RegExp is tested against the path with `/` as the separator, as in

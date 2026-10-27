@@ -38,10 +38,13 @@ all three.
 
 ## Architecture
 
-The whole library is `src/index.ts`; the tests are `test/watch.test.ts` and run against the real file system.
+`src/index.ts` holds `watch()`, which keeps the state of one watcher in a closure and returns an `EventEmitter` (`FSWatcher` is
+only a type). The parts that own their own state or have none are in their own files: `match.ts` (the `ignored` matcher, no
+state), `snapshot.ts` (validating and seeding a snapshot, no state), `options.ts` (the defaults and validation of the options, no state), `native.ts` (the `fs.watch` handles and the unwatched
+set), `pending.ts` (add / change waiting to settle and unlinks held for `atomic`) and `types.ts`. The tests in `test/` run against the real file system.
 
 - Each directory that is descended into has its own `fs.watch`. Native events are not trusted for their type or
-  file name: every event re-reads the directory and diffs it against a snapshot (`#entries`), and the diff
+  file name: every event re-reads the directory and diffs it against a snapshot (`entries`), and the diff
   produces the reports. This absorbs coalesced and duplicated events on every platform.
 - `Mode` decides whether a diff reports: `quiet` (remember only, for `ignoreInitial`), `initial` (report at
   once, it is what `ready` waits for) and `live` (report after a quiet period, see below).
@@ -49,37 +52,37 @@ The whole library is `src/index.ts`; the tests are `test/watch.test.ts` and run 
   write. With `awaitWriteFinish` they wait for a stable size and mtime instead.
 - `ready` waits 50 ms after the watchers are attached, because `fs.watch` returns before FSEvents on macOS
   delivers. A test that makes a change right after `ready` covers this; do not shorten the wait without it.
-- A link to a directory is descended into unless `followSymlinks` is false. `#ancestry` keeps the real paths of the
+- A link to a directory is descended into unless `followSymlinks` is false. `ancestries` keeps the real paths of the
   directories from the root down to each directory, and a link whose real path is already there is reported but not
   descended into, because a link back to an ancestor would loop forever. With `followSymlinks: false` a link is an
   entry of its own, compared by its `lstat` data and `readlink` target.
 - A directory whose `fs.watch` threw (`ENOSPC`, `EMFILE`) or whose native watcher reported an error and could not be
-  set up again is kept in `#unwatched` (public: `unwatched`) and reported as `error`. It is still read once, so what exists at that moment
-  is reported; later changes are missed. `rescan()` reaches `#ensureNative` for every directory, so it is also what watches it again;
-  the timer is `rescanInterval`, off by default. It reads the whole tree, not only `#unwatched`, because on NFS and Docker
-  bind mounts `fs.watch` succeeds and stays silent, so nothing is ever in `#unwatched`.
+  set up again is kept in the unwatched set of `native.ts` (public: `unwatched`) and reported as `error`. It is still read once, so what exists at that moment
+  is reported; later changes are missed. `rescan()` reaches `natives.ensure` for every directory, so it is also what watches it again;
+  the timer is `rescanInterval`, off by default. It reads the whole tree, not only the unwatched set, because on NFS and Docker
+  bind mounts `fs.watch` succeeds and stays silent, so nothing is ever in it.
 - `rescanInterval` chains `setTimeout` from `ready`: the next one is set when `rescan()` has finished, so a slow tree is
-  not read back to back. It goes through `#timeout` (unref'd with `persistent: false`) and `close()` clears it.
-- `snapshot()` serializes `#entries` (absolute paths, `{ version: 1, entries }`); `since` seeds `#entries` and
-  `#children` in the constructor, before the first scan, for the roots given to `watch()` only. Entries outside the
+  not read back to back. It goes through `timeout` (unref'd with `persistent: false`) and `close()` clears it.
+- `snapshot()` serializes `entries` (absolute paths, `{ version: 1, entries }`); `since` seeds `entries` and
+  `children` when `watch()` starts, before the first scan, for the roots given to `watch()` only. Entries outside the
   roots, deeper than `depth`, ignored by path, or below an ignored directory are dropped. The ordinary scan then does
   the diff in the `seed` mode, which `since` (even `null` or an unusable one) selects, so it overrides `ignoreInitial`.
   `seed` is `initial` that also reports `change` and `unlink` at once, because they must come before `ready`; `add()`
   keeps its own mode (`quiet` with `ignoreInitial`, else `initial`), where a `change` is still announced after the quiet
   period (or `awaitWriteFinish`) and an `unlink` is still held for `atomic`. A `Settling` job for a change keeps `before`, the entry
-  that was last reported, and a held unlink in `#unlinks` keeps its entry; `snapshot()` (and `close()`, which restores
+  that was last reported, and a held unlink in `unlinks` (`pending.ts`) keeps its entry; `snapshot()` (and `close()`, which restores
   them) records those, so a change or unlink that was never reported is reported by the next run. A path whose `add`
   is still waiting is left out. Seeding keeps an entry only if its parent is a kept directory, so no entry sits below one that is
-  missing, and a scan that is still reading when `close()` is called adds nothing to the baseline (`#visit` returns once
-  closed, also after an `unlink` listener closed it, and so do the removal in `#syncDir` and the loop in `#remove`, which leaves the entries it did not reach). A held unlink keeps
+  missing, and a scan that is still reading when `close()` is called adds nothing to the baseline (`visit` returns once
+  closed, also after an `unlink` listener closed it, and so do the removal in `syncDir` and the loop in `remove`, which leaves the entries it did not reach). A held unlink keeps
   `job.before` when the file had a change waiting. A root whose `stat` fails for a reason other than
   ENOENT/ENOTDIR (permission) keeps what is below it in any mode, instead of reporting it as removed, so `rescan()`
-  does not turn a still unreadable root into `unlink` for every seeded entry. In `seed` mode, `#forgetBelow` drops what was seeded below a link back to an ancestor (never descended into), except what a watched root at or
+  does not turn a still unreadable root into `unlink` for every seeded entry. In `seed` mode, `forgetBelow` drops what was seeded below a link back to an ancestor (never descended into), except what a watched root at or
   below that path covers (and the directories above that root), and only when the link already pointed there when the snapshot
-  was taken (a retargeted link is reported by `#visit`, with what was below it), so no entry stays that no scan can reach; a directory that was merely not read (`depth`, a
+  was taken (a retargeted link is reported by `visit`, with what was below it), so no entry stays that no scan can reach; a directory that was merely not read (`depth`, a
   permission error) keeps its baseline. The `awaitWriteFinish` poll writes the final stable `stat` (and, with `followSymlinks: false`, the `readlink`) into the entry before it dispatches, so a
   write that settles after the last scan is what the snapshot records (nothing else reads it again where native events are silent).
-- With `atomic`, the unlink of a file is held back in `#unlinks` for the window, and an `add` announced for the same
+- With `atomic`, the unlink of a file is held back in `unlinks` (`pending.ts`) for the window, and an `add` announced for the same
   path in that time becomes a `change`. A removed directory reports what is below it at once, flushing held unlinks
   first. `atomic` also adds the editor temporary file patterns to `ignored`.
 
