@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { watch as nativeWatch, type FSWatcher as NativeWatcher, type Stats } from "node:fs";
 import { lstat, readdir, readlink, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
+import { recorded, seedEntries, toSnapshot } from "./snapshot.ts";
 import { EDITOR_TEMP, list, matcher, within, type Matcher } from "./match.ts";
 import type {
   Entry,
@@ -23,7 +24,6 @@ export type {
   WatchOptions,
 } from "./types.ts";
 
-const SNAPSHOT_VERSION = 1;
 const QUIET_MS = 50;
 const READY_SETTLE_MS = 50;
 const ATOMIC_MS = 100;
@@ -38,20 +38,6 @@ type Mode = "quiet" | "initial" | "seed" | "live";
 
 const VANISHED = new Set(["ENOENT", "ENOTDIR"]);
 const DENIED = new Set(["EACCES", "EPERM"]);
-const isSnapshotEntry = (entry: unknown): entry is SnapshotEntry => {
-  const e = entry as Partial<Record<keyof SnapshotEntry, unknown>> | null;
-  return (
-    typeof e === "object" &&
-    e !== null &&
-    typeof e.path === "string" &&
-    typeof e.dir === "boolean" &&
-    typeof e.mtimeMs === "number" &&
-    typeof e.size === "number" &&
-    typeof e.ino === "number" &&
-    (e.link === undefined || typeof e.link === "string")
-  );
-};
-
 export class FSWatcher extends EventEmitter<Events> {
   readonly #ignored: Matcher;
   readonly #atomic: number;
@@ -152,53 +138,21 @@ export class FSWatcher extends EventEmitter<Events> {
     for (const [path, current] of this.#entries) {
       const job = this.#settling.get(path);
       if (job && !job.before) continue;
-      const { dir, mtimeMs, size, ino, link } = job?.before ?? current;
-      entries.push(
-        link === undefined
-          ? { path, dir, mtimeMs, size, ino }
-          : { path, dir, mtimeMs, size, ino, link },
-      );
+      entries.push(recorded(path, job?.before ?? current));
     }
-    for (const [path, { entry }] of this.#unlinks) entries.push({ path, ...entry });
-    entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-    return { version: SNAPSHOT_VERSION, entries };
+    for (const [path, { entry }] of this.#unlinks) entries.push(recorded(path, entry));
+    return toSnapshot(entries);
   }
 
   /** Remembers what `since` holds for the watched roots, so the first scan reports only the difference. */
   #seed(since: Snapshot | null | undefined, roots: string[]): void {
-    if (!since || since.version !== SNAPSHOT_VERSION || !Array.isArray(since.entries)) return;
-    const rootSet = new Set(roots);
-    // the nearest watched root at or above a path, found by walking up, not by looking at every root
-    const rootOf = (path: string): string | undefined => {
-      for (let p = path; ; p = dirname(p)) {
-        if (rootSet.has(p)) return p;
-        if (dirname(p) === p) return undefined;
-      }
-    };
-    const kept = new Set<string>();
-    // shallow first, so that whether the parent was kept is known
-    const usable = since.entries
-      .filter(isSnapshotEntry)
-      .sort((x, y) => x.path.length - y.path.length);
-    for (const entry of usable) {
-      const root = rootOf(entry.path);
-      if (root === undefined) continue;
-      // below the levels that are descended into now, so it is not scanned and would be reported as unlink
-      if (entry.path.slice(root.length).split(sep).filter(Boolean).length > this.#depth + 1)
-        continue;
-      // an ignored path, or one below an ignored directory, is not scanned: it would be reported as unlink
-      let skipped = false;
-      for (let path = entry.path; !skipped; path = dirname(path)) {
-        skipped = this.#ignored.byPath(path);
-        if (rootSet.has(path) || dirname(path) === path) break;
-      }
-      if (skipped) continue;
-      // below an entry that is missing, it can never be reached from its parent, and would stay in the baseline
-      if (!rootSet.has(entry.path) && !kept.has(dirname(entry.path))) continue;
-      if (entry.dir) kept.add(entry.path);
-      const { dir, mtimeMs, size, ino, link } = entry;
-      this.#setEntry(entry.path, { dir, mtimeMs, size, ino, link });
-    }
+    for (const { path, dir, mtimeMs, size, ino, link } of seedEntries(
+      since,
+      roots,
+      this.#depth,
+      this.#ignored.byPath,
+    ))
+      this.#setEntry(path, { dir, mtimeMs, size, ino, link });
   }
 
   add(paths: string | readonly string[]): this {
