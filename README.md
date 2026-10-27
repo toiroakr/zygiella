@@ -57,8 +57,15 @@ await watcher.close();
    await watcher.close();
    ```
 
-   `FSWatcher` is not a class here, only a TypeScript type (`import type { FSWatcher } from "zygiella"`). The
-   watcher is an `EventEmitter` created by `watch()`, so these two chokidar patterns stop working:
+   `FSWatcher` is not a class here, only a TypeScript type. Importing it as a value fails when the module loads,
+   so a type annotation needs a type-only import, even in code that never constructs a watcher:
+
+   ```ts
+   import { watch, type FSWatcher } from "zygiella"; // not: import { watch, FSWatcher } from "zygiella";
+   const watcher: FSWatcher = watch("src");
+   ```
+
+   The watcher is an `EventEmitter` created by `watch()`, so these two chokidar patterns also stop working:
 
    ```ts
    // chokidar
