@@ -1646,6 +1646,20 @@ describe("snapshot", () => {
     },
   );
 
+  test.skipIf(process.platform === "win32")(
+    "entries below a link back to an ancestor are dropped when only the ancestor is watched now",
+    async () => {
+      await writeFile(join(dir, "a.txt"), "1");
+      await symlink(dir, join(dir, "loop"), "dir");
+      const snapshot = await stopped([dir, join(dir, "loop")]);
+      expect(snapshot.entries.map((e) => e.path)).toContain(join(dir, "loop", "a.txt"));
+      await rm(join(dir, "a.txt"));
+      const { w, seen } = await start(dir, { since: snapshot });
+      expect(seen).toEqual([["unlink", join(dir, "a.txt")]]);
+      expect(w.snapshot().entries.map((e) => e.path)).not.toContain(join(dir, "loop", "a.txt"));
+    },
+  );
+
   test("a directory is in the snapshot as a directory with the file entries around it", async () => {
     await mkdir(join(dir, "sub"));
     await writeFile(join(dir, "sub", "a.txt"), "12");

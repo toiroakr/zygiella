@@ -423,6 +423,7 @@ export class FSWatcher extends EventEmitter<Events> {
 
   async #watch(roots: string[], since = false): Promise<ReadyResult> {
     await this.#start(roots, since ? "seed" : this.#ignoreInitial ? "quiet" : "initial");
+    if (since) this.#pruneUnread(roots);
     const missing = [...new Set(roots)].filter((root) => this.#missingAtStart.has(root));
     // not unref'd: a caller awaiting `ready` would otherwise see the process exit before it resolves (exit code 13)
     // fs.watch returns before the OS starts delivering (FSEvents on macOS): a change made in that gap is never reported
@@ -544,6 +545,20 @@ export class FSWatcher extends EventEmitter<Events> {
     }
     if (previousProbe) this.#release(previousProbe);
     if (previousParent) this.#release(previousParent);
+  }
+
+  /**
+   * Forgets what a snapshot put below a directory that the first scan did not read, for example below a link back to
+   * an ancestor: nothing would ever scan it, so it would stay in the baseline after the file is gone. A root that
+   * could not be inspected keeps its baseline.
+   */
+  #pruneUnread(roots: string[]): void {
+    for (const [path, entry] of this.#entries) {
+      if (!entry.dir || this.#depthLeft.has(path) || !this.#entries.has(path)) continue;
+      const root = roots.find((r) => within(r, path));
+      if (root === undefined || this.#kinds.get(root) !== "dir") continue;
+      this.#remove(path, false, (key) => key !== path);
+    }
   }
 
   #stat(path: string): Promise<Stats> {
