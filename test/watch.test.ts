@@ -9,11 +9,12 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
+import { mkdirSync, rmSync as removeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { watch, type FSWatcher } from "../src/index.ts";
+import { watch, type FSWatcher, type Snapshot } from "../src/index.ts";
 
 type Seen = Array<[string, string]>;
 
@@ -1241,5 +1242,547 @@ describe("persistent", () => {
     expect(await exited).toBe(0);
     clearTimeout(timer);
     expect(output()).toContain(`add ${join(dir, "a.txt")}`);
+  });
+});
+
+describe("snapshot", () => {
+  // what a process would write to a file on exit and read back on the next start
+  const saved = (w: FSWatcher): Snapshot => JSON.parse(JSON.stringify(w.snapshot()));
+
+  async function stopped(paths: string | string[], opts: Parameters<typeof watch>[1] = {}) {
+    const { w } = await start(paths, opts);
+    const snapshot = saved(w);
+    await w.close();
+    return snapshot;
+  }
+
+  test("a file whose size changed while the watcher was not running is reported as change before ready", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const snapshot = await stopped(dir);
+    await writeFile(join(dir, "a.txt"), "22");
+    const { seen } = await start(dir, { since: snapshot });
+    expect(seen).toEqual([["change", join(dir, "a.txt")]]);
+  });
+
+  test("nothing is reported for what is the same as in the snapshot", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const snapshot = await stopped(dir);
+    const { seen } = await start(dir, { since: snapshot });
+    await settle();
+    expect(seen).toEqual([]);
+  });
+
+  test("a file deleted while the watcher was not running is reported as unlink before ready", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    await writeFile(join(dir, "b.txt"), "1");
+    const snapshot = await stopped(dir);
+    await rm(join(dir, "b.txt"));
+    const { seen } = await start(dir, { since: snapshot });
+    expect(seen).toEqual([["unlink", join(dir, "b.txt")]]);
+  });
+
+  test("a file created while the watcher was not running is reported as add before ready", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const snapshot = await stopped(dir);
+    await writeFile(join(dir, "b.txt"), "1");
+    const { seen } = await start(dir, { since: snapshot });
+    expect(seen).toEqual([["add", join(dir, "b.txt")]]);
+  });
+
+  test("changes below a subdirectory are reported with the subdirectory's own state unchanged", async () => {
+    await mkdir(join(dir, "sub"));
+    await writeFile(join(dir, "sub", "a.txt"), "1");
+    await writeFile(join(dir, "sub", "gone.txt"), "1");
+    const snapshot = await stopped(dir);
+    await writeFile(join(dir, "sub", "a.txt"), "22");
+    await rm(join(dir, "sub", "gone.txt"));
+    await writeFile(join(dir, "sub", "new.txt"), "1");
+    const { seen } = await start(dir, { since: snapshot });
+    expect(seen).toHaveLength(3);
+    expect(seen).toEqual(
+      expect.arrayContaining([
+        ["change", join(dir, "sub", "a.txt")],
+        ["unlink", join(dir, "sub", "gone.txt")],
+        ["add", join(dir, "sub", "new.txt")],
+      ]),
+    );
+  });
+
+  test("a directory removed while the watcher was not running is reported as unlinkDir after what was in it", async () => {
+    await mkdir(join(dir, "sub"));
+    await writeFile(join(dir, "sub", "a.txt"), "1");
+    const snapshot = await stopped(dir);
+    await rm(join(dir, "sub"), { recursive: true });
+    const { seen } = await start(dir, { since: snapshot });
+    expect(seen).toEqual([
+      ["unlink", join(dir, "sub", "a.txt")],
+      ["unlinkDir", join(dir, "sub")],
+    ]);
+  });
+
+  test("a directory created while the watcher was not running is reported as addDir and add before ready", async () => {
+    const snapshot = await stopped(dir);
+    await mkdir(join(dir, "sub"));
+    await writeFile(join(dir, "sub", "a.txt"), "1");
+    const { seen } = await start(dir, { since: snapshot });
+    expect(seen).toEqual([
+      ["addDir", join(dir, "sub")],
+      ["add", join(dir, "sub", "a.txt")],
+    ]);
+  });
+
+  test("a watcher started from a snapshot goes on reporting live changes below known directories", async () => {
+    await mkdir(join(dir, "sub"));
+    await writeFile(join(dir, "sub", "a.txt"), "1");
+    const snapshot = await stopped(dir);
+    const { seen } = await start(dir, { since: snapshot });
+    await writeFile(join(dir, "sub", "a.txt"), "22");
+    await until(() => seen.length > 0);
+    expect(seen).toEqual([["change", join(dir, "sub", "a.txt")]]);
+  });
+
+  test("a root that was deleted while the watcher was not running reports what was in it as unlink", async () => {
+    await mkdir(join(dir, "sub"));
+    await writeFile(join(dir, "sub", "a.txt"), "1");
+    const snapshot = await stopped(join(dir, "sub"));
+    await rm(join(dir, "sub"), { recursive: true });
+    const { seen } = await start(join(dir, "sub"), { since: snapshot });
+    expect(seen).toEqual([
+      ["unlink", join(dir, "sub", "a.txt")],
+      ["unlinkDir", join(dir, "sub")],
+    ]);
+  });
+
+  test("ignoreInitial does not hide the difference from the snapshot", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const snapshot = await stopped(dir);
+    await writeFile(join(dir, "a.txt"), "22");
+    await writeFile(join(dir, "b.txt"), "1");
+    const { seen } = await start(dir, { since: snapshot, ignoreInitial: true });
+    expect(seen).toHaveLength(2);
+    expect(seen).toEqual(
+      expect.arrayContaining([
+        ["change", join(dir, "a.txt")],
+        ["add", join(dir, "b.txt")],
+      ]),
+    );
+  });
+
+  test("a snapshot of another version is dropped and everything is reported as add", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const snapshot = { ...(await stopped(dir)), version: 999 } as unknown as Snapshot;
+    const { seen } = await start(dir, { since: snapshot, ignoreInitial: true });
+    expect(seen).toEqual([
+      ["addDir", dir],
+      ["add", join(dir, "a.txt")],
+    ]);
+  });
+
+  test.each([[null], [{}], [{ version: 1 }], [{ version: 1, entries: "x" }]])(
+    "a malformed snapshot (%j) is dropped and everything is reported as add",
+    async (snapshot) => {
+      await writeFile(join(dir, "a.txt"), "1");
+      const { seen } = await start(dir, { since: snapshot as unknown as Snapshot });
+      expect(seen).toEqual([
+        ["addDir", dir],
+        ["add", join(dir, "a.txt")],
+      ]);
+    },
+  );
+
+  test("an entry of a snapshot with a malformed entry is skipped and the rest is used", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const snapshot = await stopped(dir);
+    snapshot.entries.push({ path: 5 } as never);
+    const { seen } = await start(dir, { since: snapshot });
+    await settle();
+    expect(seen).toEqual([]);
+  });
+
+  test("a path that is ignored now is not reported as unlink although it is in the snapshot", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    await writeFile(join(dir, "b.log"), "1");
+    const snapshot = await stopped(dir);
+    const { seen } = await start(dir, { since: snapshot, ignored: /\.log$/ });
+    await settle();
+    expect(seen).toEqual([]);
+  });
+
+  test("a path that is ignored when the snapshot is taken is not in it", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    await writeFile(join(dir, "b.log"), "1");
+    const snapshot = await stopped(dir, { ignored: /\.log$/ });
+    expect(snapshot.entries.map((e) => e.path)).toEqual([dir, join(dir, "a.txt")]);
+  });
+
+  test("entries outside the watched paths are not reported as unlink", async () => {
+    await mkdir(join(dir, "x"));
+    await mkdir(join(dir, "y"));
+    await writeFile(join(dir, "x", "a.txt"), "1");
+    await writeFile(join(dir, "y", "b.txt"), "1");
+    const snapshot = await stopped(dir);
+    const { seen } = await start(join(dir, "x"), { since: snapshot });
+    await settle();
+    expect(seen).toEqual([]);
+  });
+
+  test("a file still waiting to be reported is left out, so the next start reports it as add", async () => {
+    const { w, seen } = await start(dir, {
+      awaitWriteFinish: { stabilityThreshold: 600, pollInterval: 20 },
+    });
+    await writeFile(join(dir, "a.txt"), "1");
+    await w.rescan();
+    expect(w.snapshot().entries.map((e) => e.path)).toEqual([dir]);
+    await until(() => seen.length > 0, 5000);
+    expect(w.snapshot().entries.map((e) => e.path)).toEqual([dir, join(dir, "a.txt")]);
+  });
+
+  test("a file that was still waiting to be reported when the watcher was closed is not in the snapshot taken after", async () => {
+    const { w } = await start(dir, {
+      awaitWriteFinish: { stabilityThreshold: 2000, pollInterval: 20 },
+    });
+    await writeFile(join(dir, "a.txt"), "1");
+    await w.rescan();
+    await w.close();
+    expect(w.snapshot().entries.map((e) => e.path)).toEqual([dir]);
+  });
+
+  test("a change still waiting to be reported keeps the state before it, so the next start reports change", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { w } = await start(dir, {
+      awaitWriteFinish: { stabilityThreshold: 600, pollInterval: 20 },
+    });
+    await writeFile(join(dir, "a.txt"), "22");
+    await w.rescan();
+    const entry = (snapshot: Snapshot) =>
+      snapshot.entries.find((e) => e.path === join(dir, "a.txt"));
+    expect(entry(w.snapshot())?.size).toBe(1);
+    await w.close();
+    const snapshot = saved(w);
+    expect(entry(snapshot)?.size).toBe(1);
+    const { seen } = await start(dir, { since: snapshot });
+    expect(seen).toEqual([["change", join(dir, "a.txt")]]);
+  });
+
+  test("entries deeper than depth are dropped, not reported as unlink", async () => {
+    await mkdir(join(dir, "sub", "deep"), { recursive: true });
+    await writeFile(join(dir, "sub", "a.txt"), "1");
+    await writeFile(join(dir, "sub", "deep", "b.txt"), "1");
+    const snapshot = await stopped(dir);
+    const { w, seen } = await start(dir, { since: snapshot, depth: 0 });
+    await settle();
+    expect(seen).toEqual([]);
+    expect(w.snapshot().entries.map((e) => e.path)).toEqual([dir, join(dir, "sub")]);
+  });
+
+  test("add() on a running watcher still waits for awaitWriteFinish before reporting a change", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { w, seen } = await start(dir, {
+      ignoreInitial: false,
+      awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 20 },
+    });
+    await writeFile(join(dir, "a.txt"), "22");
+    await w.add(dir).ready;
+    expect(seen.filter(([e]) => e === "change")).toEqual([]);
+    await until(() => seen.some(([e]) => e === "change"), 5000);
+  });
+
+  test("an entry whose parent directory is missing from the snapshot is dropped, not kept unreachable", async () => {
+    await mkdir(join(dir, "sub"));
+    await writeFile(join(dir, "sub", "a.txt"), "1");
+    const snapshot = await stopped(dir);
+    snapshot.entries = snapshot.entries.filter((e) => e.path !== join(dir, "sub"));
+    await rm(join(dir, "sub"), { recursive: true });
+    const { w, seen } = await start(dir, { since: snapshot });
+    await settle();
+    expect(seen).toEqual([]);
+    expect(w.snapshot().entries.map((e) => e.path)).toEqual([dir]);
+  });
+
+  test("files read after close() is called from a listener are not in the snapshot taken afterwards", async () => {
+    for (let i = 0; i < 40; i++) await writeFile(join(dir, `f${i}.txt`), "1");
+    const w = watch(dir, { ignoreInitial: false });
+    watchers.push(w);
+    const seen: string[] = [];
+    w.on("add", (path) => {
+      seen.push(path);
+      void w.close();
+    });
+    await until(() => seen.length > 0);
+    await w.close();
+    await w.rescan();
+    const files = w.snapshot().entries.filter((e) => !e.dir);
+    expect(files.every((e) => seen.includes(e.path))).toBe(true);
+  });
+
+  test("a file deleted and created again within the atomic window keeps its reported state in the snapshot", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { w } = await start(dir, {
+      atomic: 500,
+      awaitWriteFinish: { stabilityThreshold: 600, pollInterval: 20 },
+    });
+    await rm(join(dir, "a.txt"));
+    await w.rescan();
+    await writeFile(join(dir, "a.txt"), "22");
+    await w.rescan();
+    await w.close();
+    const snapshot = saved(w);
+    expect(snapshot.entries.find((e) => e.path === join(dir, "a.txt"))?.size).toBe(1);
+    const { seen } = await start(dir, { since: snapshot });
+    expect(seen).toEqual([["change", join(dir, "a.txt")]]);
+  });
+
+  test("a file whose unlink is still held back is in the snapshot, so the next start reports the unlink", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { w } = await start(dir, { atomic: 2000 });
+    await rm(join(dir, "a.txt"));
+    await w.rescan();
+    const snapshot = saved(w);
+    expect(snapshot.entries.map((e) => e.path)).toContain(join(dir, "a.txt"));
+    await w.close();
+    expect(saved(w).entries.map((e) => e.path)).toContain(join(dir, "a.txt"));
+    const { seen } = await start(dir, { since: snapshot });
+    expect(seen).toEqual([["unlink", join(dir, "a.txt")]]);
+  });
+
+  test("a file deleted while its change is still waiting keeps the last reported state in the snapshot", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { w } = await start(dir, {
+      atomic: 2000,
+      awaitWriteFinish: { stabilityThreshold: 5000, pollInterval: 20 },
+    });
+    await writeFile(join(dir, "a.txt"), "22");
+    await w.rescan();
+    await rm(join(dir, "a.txt"));
+    await w.rescan();
+    expect(w.snapshot().entries.find((e) => e.path === join(dir, "a.txt"))?.size).toBe(1);
+  });
+
+  test("a replacement that is read after close() is called from an unlink listener is not in the snapshot", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const { w } = await start(dir);
+    let unlinked = false;
+    w.on("unlink", () => {
+      unlinked = true;
+      void w.close();
+    });
+    removeSync(join(dir, "a.txt"));
+    mkdirSync(join(dir, "a.txt"));
+    await until(() => unlinked);
+    await w.close();
+    expect(w.snapshot().entries.map((e) => e.path)).not.toContain(join(dir, "a.txt"));
+  });
+
+  test("what is still to be reported stays in the snapshot when an unlink listener closes the watcher", async () => {
+    await mkdir(join(dir, "sub"));
+    await writeFile(join(dir, "sub", "a.txt"), "1");
+    await writeFile(join(dir, "sub", "b.txt"), "1");
+    const { w } = await start(dir);
+    const reported: string[] = [];
+    w.on("unlink", (path) => {
+      reported.push(path);
+      void w.close();
+    });
+    await rm(join(dir, "sub"), { recursive: true });
+    await until(() => reported.length > 0);
+    await w.close();
+    expect(reported).toHaveLength(1);
+    const left = w.snapshot().entries.map((e) => e.path);
+    const other = [join(dir, "sub", "a.txt"), join(dir, "sub", "b.txt")].find(
+      (p) => p !== reported[0],
+    )!;
+    expect(left).toEqual(expect.arrayContaining([join(dir, "sub"), other]));
+  });
+
+  test("an entry below a file in the snapshot is dropped, not kept unreachable", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const snapshot = await stopped(dir);
+    const file = snapshot.entries.find((e) => e.path === join(dir, "a.txt"))!;
+    snapshot.entries.push({ ...file, path: join(dir, "a.txt", "orphan.txt") });
+    const { w } = await start(dir, { since: snapshot });
+    expect(w.snapshot().entries.map((e) => e.path)).not.toContain(join(dir, "a.txt", "orphan.txt"));
+  });
+
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "a root that cannot be inspected for lack of permission keeps its baseline instead of reporting unlink",
+    async () => {
+      await mkdir(join(dir, "outer", "x"), { recursive: true });
+      await writeFile(join(dir, "outer", "x", "a.txt"), "1");
+      const snapshot = await stopped(join(dir, "outer", "x"));
+      await chmod(join(dir, "outer"), 0o000);
+      try {
+        const { w, seen } = await start(join(dir, "outer", "x"), {
+          since: snapshot,
+          ignorePermissionErrors: true,
+        });
+        await settle();
+        expect(seen).toEqual([]);
+        expect(w.snapshot().entries.map((e) => e.path)).toContain(join(dir, "outer", "x", "a.txt"));
+      } finally {
+        await chmod(join(dir, "outer"), 0o755);
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "rescan() does not report the baseline of a root that is still unreadable as unlink",
+    async () => {
+      await mkdir(join(dir, "outer", "x"), { recursive: true });
+      await writeFile(join(dir, "outer", "x", "a.txt"), "1");
+      const snapshot = await stopped(join(dir, "outer", "x"));
+      await chmod(join(dir, "outer"), 0o000);
+      try {
+        const { w, seen } = await start(join(dir, "outer", "x"), {
+          since: snapshot,
+          ignorePermissionErrors: true,
+        });
+        await w.rescan();
+        await settle();
+        expect(seen).toEqual([]);
+        expect(w.snapshot().entries.map((e) => e.path)).toContain(join(dir, "outer", "x", "a.txt"));
+      } finally {
+        await chmod(join(dir, "outer"), 0o755);
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "entries below a link back to an ancestor are dropped when only the ancestor is watched now",
+    async () => {
+      await writeFile(join(dir, "a.txt"), "1");
+      await symlink(dir, join(dir, "loop"), "dir");
+      const snapshot = await stopped([dir, join(dir, "loop")]);
+      expect(snapshot.entries.map((e) => e.path)).toContain(join(dir, "loop", "a.txt"));
+      await rm(join(dir, "a.txt"));
+      const { w, seen } = await start(dir, { since: snapshot });
+      expect(seen).toEqual([["unlink", join(dir, "a.txt")]]);
+      expect(w.snapshot().entries.map((e) => e.path)).not.toContain(join(dir, "loop", "a.txt"));
+    },
+  );
+
+  test("a root below a directory that depth leaves unread keeps its entries", async () => {
+    await mkdir(join(dir, "sub", "deep"), { recursive: true });
+    await writeFile(join(dir, "sub", "deep", "b.txt"), "1");
+    const roots = [dir, join(dir, "sub", "deep")];
+    const snapshot = await stopped(roots);
+    const { w, seen } = await start(roots, { since: snapshot, depth: 0 });
+    await settle();
+    expect(seen).toEqual([]);
+    expect(w.snapshot().entries.map((e) => e.path)).toContain(join(dir, "sub", "deep", "b.txt"));
+  });
+
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "a directory below one that cannot be read keeps its baseline",
+    async () => {
+      await mkdir(join(dir, "locked", "nested"), { recursive: true });
+      await writeFile(join(dir, "locked", "nested", "a.txt"), "1");
+      const snapshot = await stopped(dir);
+      await chmod(join(dir, "locked"), 0o000);
+      try {
+        const { w, seen } = await start(dir, { since: snapshot, ignorePermissionErrors: true });
+        await settle();
+        expect(seen).toEqual([]);
+        expect(w.snapshot().entries.map((e) => e.path)).toContain(
+          join(dir, "locked", "nested", "a.txt"),
+        );
+      } finally {
+        await chmod(join(dir, "locked"), 0o755);
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "below a link back to an ancestor only what a watched root covers is kept",
+    async () => {
+      await mkdir(join(dir, "x"));
+      await writeFile(join(dir, "x", "f.txt"), "1");
+      await writeFile(join(dir, "a.txt"), "1");
+      await symlink(dir, join(dir, "loop"), "dir");
+      const snapshot = await stopped(dir);
+      const copy = (from: string, to: string) => {
+        const entry = snapshot.entries.find((e) => e.path === from)!;
+        snapshot.entries.push({ ...entry, path: to });
+      };
+      copy(join(dir, "x"), join(dir, "loop", "x"));
+      copy(join(dir, "x", "f.txt"), join(dir, "loop", "x", "f.txt"));
+      copy(join(dir, "a.txt"), join(dir, "loop", "a.txt"));
+      const { w } = await start([dir, join(dir, "loop", "x")], { since: snapshot });
+      const left = w.snapshot().entries.map((e) => e.path);
+      expect(left).toContain(join(dir, "loop", "x", "f.txt"));
+      expect(left).not.toContain(join(dir, "loop", "a.txt"));
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "a root below a link back to an ancestor keeps the directories above it too",
+    async () => {
+      await mkdir(join(dir, "m", "sub"), { recursive: true });
+      await writeFile(join(dir, "m", "sub", "f.txt"), "1");
+      await symlink(dir, join(dir, "loop"), "dir");
+      const snapshot = await stopped(dir);
+      for (const rel of [["m"], ["m", "sub"], ["m", "sub", "f.txt"]]) {
+        const entry = snapshot.entries.find((e) => e.path === join(dir, ...rel))!;
+        snapshot.entries.push({ ...entry, path: join(dir, "loop", ...rel) });
+      }
+      const { w } = await start([dir, join(dir, "loop", "m", "sub")], { since: snapshot });
+      const left = w.snapshot().entries.map((e) => e.path);
+      expect(left).toEqual(
+        expect.arrayContaining([join(dir, "loop", "m"), join(dir, "loop", "m", "sub", "f.txt")]),
+      );
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "a link that now points back to an ancestor reports what was below it as unlink",
+    async () => {
+      await mkdir(join(dir, "sub"));
+      await writeFile(join(dir, "sub", "old.txt"), "1");
+      await symlink(join(dir, "sub"), join(dir, "link"), "dir");
+      const snapshot = await stopped(dir);
+      await rm(join(dir, "link"));
+      await symlink(dir, join(dir, "link"), "dir");
+      const { seen } = await start(dir, { since: snapshot });
+      expect(seen).toEqual(
+        expect.arrayContaining([
+          ["unlink", join(dir, "link", "old.txt")],
+          ["unlinkDir", join(dir, "link")],
+          ["addDir", join(dir, "link")],
+        ]),
+      );
+    },
+  );
+
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "a directory that cannot be inspected because its parent has no search permission keeps its baseline",
+    async () => {
+      await mkdir(join(dir, "parent", "q"), { recursive: true });
+      await writeFile(join(dir, "parent", "q", "a.txt"), "1");
+      const snapshot = await stopped(dir);
+      await chmod(join(dir, "parent"), 0o444);
+      try {
+        const { w, seen } = await start(dir, { since: snapshot, ignorePermissionErrors: true });
+        await settle();
+        expect(seen).toEqual([]);
+        expect(w.snapshot().entries.map((e) => e.path)).toContain(
+          join(dir, "parent", "q", "a.txt"),
+        );
+      } finally {
+        await chmod(join(dir, "parent"), 0o755);
+      }
+    },
+  );
+
+  test("a directory is in the snapshot as a directory with the file entries around it", async () => {
+    await mkdir(join(dir, "sub"));
+    await writeFile(join(dir, "sub", "a.txt"), "12");
+    const { w } = await start(dir);
+    const { version, entries } = w.snapshot();
+    expect(version).toBe(1);
+    expect(entries.map((e) => [e.path, e.dir])).toEqual([
+      [dir, true],
+      [join(dir, "sub"), true],
+      [join(dir, "sub", "a.txt"), false],
+    ]);
+    expect(entries.find((e) => e.path === join(dir, "sub", "a.txt"))?.size).toBe(2);
   });
 });

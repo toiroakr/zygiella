@@ -106,6 +106,7 @@ A path that cannot be read because of permissions is not in `missing`; it is emi
 | `atomic`                 | `true`    | `true` or a number of ms (`true` is 100). An `unlink` is held back for that long, and a file created again at the same path within it is reported as one `change`, as editors that save by deleting and creating the file produce. Also ignores editor temporary files (`.swp`, `.swx`, a trailing `~`, Sublime's `.subl*.tmp`). `false` reports a deleted file's `unlink` without the wait (an `add` is still reported after the usual 50 ms, or `awaitWriteFinish`). |
 | `awaitWriteFinish`       | `false`   | `true` or `{ stabilityThreshold, pollInterval }` in ms (defaults 2000 and 100). Holds `add` and `change` back until size and mtime stop changing.                                                                                                                                                                                                                                                                                                                      |
 | `ignorePermissionErrors` | `false`   | Skip directories that cannot be read (`EACCES`, `EPERM`) silently. Otherwise each is emitted once as `error`.                                                                                                                                                                                                                                                                                                                                                          |
+| `since`                  | none      | A `Snapshot` from `watcher.snapshot()`, taken in an earlier run (`null` on the first run). The initial scan then reports only what differs from it, before `ready`, whatever `ignoreInitial` says. See [Changes made while the process was not running](#changes-made-while-the-process-was-not-running).                                                                                                                                                              |
 | `persistent`             | `true`    | With `false`, the watcher does not keep the process alive: a process with nothing else to do exits without `close()`. Events are still reported while something else keeps the process running.                                                                                                                                                                                                                                                                        |
 | `rescanInterval`         | `0`       | Call `rescan()` every this many ms (the wait starts when the previous read is done), from `ready` until `close()`. For file systems where `fs.watch` reports nothing. With `persistent: false` the timer does not keep the process alive. `0`: no timer. See [Environments without native events](#environments-without-native-events).                                                                                                                                |
 
@@ -130,6 +131,7 @@ A path that cannot be read because of permissions is not in `missing`; it is emi
 | `unwatch(paths)` | Stop watching paths that were given to `watch()` or `add()`. Returns the watcher.                                                                                                                                                                                                                                                                                                                                                                       |
 | `rescan()`       | Read every watched path again now and report the difference. Returns a promise. See [Environments without native events](#environments-without-native-events).                                                                                                                                                                                                                                                                                          |
 | `unwatched`      | The directories that are read but have no native watch, as a sorted array of absolute paths: `fs.watch` threw (`ENOSPC`, `EMFILE`) or reported an error, and watching again failed. Changes below them are missed. Empty when every watch is established. See [Behavior](#behavior).                                                                                                                                                                    |
+| `snapshot()`     | The state of everything watched as a JSON-serializable `{ version, entries }`, to save on exit and pass as `since` on the next start. See [Changes made while the process was not running](#changes-made-while-the-process-was-not-running).                                                                                                                                                                                                            |
 | `close()`        | Stop watching. Takes effect when called: nothing is reported afterwards, even if you do not `await` it. Returns a promise that resolves once work in progress has finished.                                                                                                                                                                                                                                                                             |
 | `ready`          | A promise that resolves to `{ missing }` once the paths last given to `watch()` or `add()` are being watched. `missing` lists the paths of that call that did not exist. `await watcher.add(p).ready` is safe to change `p` right after. A change made between `watch()` and `ready` can be missed, or reported as an initial `add` (with `ignoreInitial: false`) or as a normal event, depending on timing, so await `ready` before changing anything. |
 
@@ -193,6 +195,52 @@ a read is running does not report the same change twice, and after `close()` it 
 whole tree, so keep the interval long for a large one. `rescanInterval` must be a number from 0 to 2147483647; any other number, and any value that is not a number
 (including `false` and a numeric string), throws a `RangeError`. `undefined` and `null` mean the default, 0.
 
+## Changes made while the process was not running
+
+`ignoreInitial: false` reports everything that exists as `add`. To learn instead that `a.ts` changed and `b.ts` was
+deleted since the last run, save `watcher.snapshot()` when you stop and pass it back as `since`. Reading and
+writing the file is yours; zygiella does no I/O for it, so it stays dependency-free:
+
+```ts
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
+import { watch } from "zygiella";
+
+const file = ".cache/watch-snapshot.json";
+const since = await readFile(file, "utf8")
+  .then(JSON.parse)
+  .catch(() => null); // null: first run, or a file that cannot be read
+
+const watcher = watch("src", { since });
+// before `ready`: add / change / unlink / addDir / unlinkDir for what differs from the snapshot
+watcher.on("all", (event, path) => console.log(event, path));
+await watcher.ready;
+
+// on exit
+await mkdir(dirname(file), { recursive: true });
+await writeFile(file, JSON.stringify(watcher.snapshot()));
+await watcher.close();
+```
+
+- A path is reported as `add` when it is not in the snapshot, `unlink` when it is in the snapshot and gone, and
+  `change` when its size, mtime, inode or symbolic link target differs, the same test as a live `change`. Directories are `addDir` and
+  `unlinkDir`; what was below a removed directory is reported as `unlink` first.
+- `since` replaces the initial report: `ignoreInitial` has no effect on it, so `ignoreInitial: true` with a snapshot
+  still reports the difference. Without a usable snapshot, everything is reported as `add` (`addDir` for directories),
+  whatever `ignoreInitial` says. A usable snapshot has `version: 1` and an `entries` array; an entry that does not
+  look like one is skipped. When the format changes, `version` changes and an old snapshot is dropped this way, so
+  the worst case is a full `add`. `null` is for the first run, when there is no file yet.
+- The snapshot holds absolute paths, as events report them, so use it on the same machine and with the same
+  paths. An entry outside the paths you now watch is ignored, not reported as `unlink`.
+- Pass the same `ignored`, `depth` and `followSymlinks` as when it was taken. A path that `ignored` skips now
+  (by its path, or because a directory above it is skipped) is left out of the comparison, so it is not reported as
+  `unlink`; so is a path deeper than `depth` now. Turning `followSymlinks` off makes what was below a link count as
+  removed.
+- The snapshot is what has been reported so far. A file whose `add` is still waiting (the 50 ms quiet period, or
+  `awaitWriteFinish`) is left out, so the next start reports it as `add`. A `change` that is waiting, or an `unlink`
+  held back by `atomic`, is recorded as it was before, so the next start reports `change` or `unlink`. This also holds
+  for `snapshot()` called after `close()`.
+
 ## Behavior
 
 - A burst of events for one file is reported once, 50 ms after the last event (Linux reports a write as truncate
@@ -223,7 +271,9 @@ whole tree, so keep the interval long for a large one. `rescanInterval` must be 
 - Nothing above a watched path is watched. A link given to `watch()`, or a link whose target is outside the watched
   tree, is not noticed when the link is replaced or when its target is deleted and created again.
 - A directory or an entry (including the target of a symbolic link) that cannot be read, watched or inspected
-  because of permissions (`EACCES`, `EPERM`) is emitted as `error` once per path, and `ready` still resolves. With `ignorePermissionErrors: true` it is skipped silently. A path that
+  because of permissions (`EACCES`, `EPERM`) is emitted as `error` once per path, and `ready` still resolves. With `ignorePermissionErrors: true` it is skipped silently. A watched path
+  that cannot be inspected for lack of permission is not reported as removed, and what is below it stays as it was
+  until it can be read again. A path that
   disappears while being watched (`ENOENT`, `ENOTDIR`) is skipped silently. Other failures are emitted as
   `error`; without an `error` listener that throws, as with any `EventEmitter`.
 

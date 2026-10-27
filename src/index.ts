@@ -42,6 +42,13 @@ export interface WatchOptions {
    */
   persistent?: boolean;
   /**
+   * A snapshot from `watcher.snapshot()`, taken in an earlier run. The initial scan then reports only what differs
+   * from it (add, change, unlink, addDir, unlinkDir) before `ready`, whatever `ignoreInitial` says. `null`, or a
+   * snapshot that is not usable (another version, malformed), is dropped, so everything is reported as add: pass
+   * `null` on the first run.
+   */
+  since?: Snapshot | null;
+  /**
    * Call `rescan()` this many ms after the previous one finished, from `ready` until `close()`, for file systems
    * where `fs.watch` reports nothing (NFS, Docker bind mounts, `/mnt/c` in WSL2). The wait starts when a read is
    * done, so a slow tree is not read back to back. With `persistent: false` the timer is unref'd. 0 or unset: no
@@ -52,6 +59,23 @@ export interface WatchOptions {
   ignorePermissionErrors?: boolean;
   /** Hold add / change back until the file's size and mtime have been stable for `stabilityThreshold` ms. */
   awaitWriteFinish?: boolean | { stabilityThreshold?: number; pollInterval?: number };
+}
+
+/** What `snapshot()` records of one path. Absolute, with the platform's separator, as events report it. */
+export interface SnapshotEntry {
+  path: string;
+  dir: boolean;
+  mtimeMs: number;
+  size: number;
+  ino: number;
+  /** Where a link points when it is watched as itself; for a directory, its real path. */
+  link?: string;
+}
+
+/** JSON-serializable state of a watcher. Pass it back as `since` to learn what changed in between. */
+export interface Snapshot {
+  version: 1;
+  entries: SnapshotEntry[];
 }
 
 export interface ReadyResult {
@@ -81,9 +105,12 @@ interface Entry {
 
 interface Settling {
   event: "add" | "change";
+  /** What was reported last, for a change that is still waiting: that is what `snapshot()` records. */
+  before?: Entry;
   timer?: NodeJS.Timeout;
 }
 
+const SNAPSHOT_VERSION = 1;
 const QUIET_MS = 50;
 const READY_SETTLE_MS = 50;
 const ATOMIC_MS = 100;
@@ -91,8 +118,11 @@ const ATOMIC_MS = 100;
 const MAX_TIMER_MS = 2 ** 31 - 1;
 const EDITOR_TEMP = /\..*\.(sw[px])$|~$|\.subl.*\.tmp/;
 
-/** quiet: remember only. initial: report at once (it is what `ready` waits for). live: report once the burst of events is over. */
-type Mode = "quiet" | "initial" | "live";
+/**
+ * quiet: remember only. initial: report at once (it is what `ready` waits for). seed: initial against a snapshot, so
+ * `change` and `unlink` come at once too. live: report once the burst of events is over.
+ */
+type Mode = "quiet" | "initial" | "seed" | "live";
 
 const VANISHED = new Set(["ENOENT", "ENOTDIR"]);
 const DENIED = new Set(["EACCES", "EPERM"]);
@@ -136,6 +166,20 @@ function matcher(ignored: Ignored | undefined): Matcher {
   };
 }
 
+const isSnapshotEntry = (entry: unknown): entry is SnapshotEntry => {
+  const e = entry as Partial<Record<keyof SnapshotEntry, unknown>> | null;
+  return (
+    typeof e === "object" &&
+    e !== null &&
+    typeof e.path === "string" &&
+    typeof e.dir === "boolean" &&
+    typeof e.mtimeMs === "number" &&
+    typeof e.size === "number" &&
+    typeof e.ino === "number" &&
+    (e.link === undefined || typeof e.link === "string")
+  );
+};
+
 const list = (paths: string | readonly string[]): string[] =>
   (typeof paths === "string" ? [paths] : [...paths]).map((p) => resolve(p));
 
@@ -161,7 +205,8 @@ export class FSWatcher extends EventEmitter<Events> {
   readonly #native = new Map<string, NativeWatcher>();
   readonly #queues = new Map<string, { dirty: boolean; done: Promise<void> }>();
   readonly #settling = new Map<string, Settling>();
-  readonly #unlinks = new Map<string, NodeJS.Timeout>();
+  /** An unlink held back for `atomic`: it is not reported yet, so `entry` is still what was last reported. */
+  readonly #unlinks = new Map<string, { timer: NodeJS.Timeout; entry: Entry }>();
   readonly #denied = new Set<string>();
   readonly #unwatched = new Set<string>();
   readonly #missingAtStart = new Set<string>();
@@ -219,11 +264,72 @@ export class FSWatcher extends EventEmitter<Events> {
           pollInterval: (typeof awf === "object" && awf.pollInterval) || 100,
         }
       : undefined;
-    this.#ready = this.#watch(list(paths)).then((result) => {
+    const roots = list(paths);
+    this.#seed(options.since, roots);
+    this.#ready = this.#watch(roots, options.since !== undefined).then((result) => {
       if (!this.#closed) this.emit("ready", result);
       this.#scheduleRescan();
       return result;
     });
+  }
+
+  /**
+   * The state to start the next run from (`since`): what has been reported so far. A file whose `add` is still
+   * waiting is left out, so the next run reports it; a `change` that is waiting, or an `unlink` held back for
+   * `atomic`, is recorded as it was before, so the next run reports that too.
+   */
+  snapshot(): Snapshot {
+    const entries: SnapshotEntry[] = [];
+    for (const [path, current] of this.#entries) {
+      const job = this.#settling.get(path);
+      if (job && !job.before) continue;
+      const { dir, mtimeMs, size, ino, link } = job?.before ?? current;
+      entries.push(
+        link === undefined
+          ? { path, dir, mtimeMs, size, ino }
+          : { path, dir, mtimeMs, size, ino, link },
+      );
+    }
+    for (const [path, { entry }] of this.#unlinks) entries.push({ path, ...entry });
+    entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    return { version: SNAPSHOT_VERSION, entries };
+  }
+
+  /** Remembers what `since` holds for the watched roots, so the first scan reports only the difference. */
+  #seed(since: Snapshot | null | undefined, roots: string[]): void {
+    if (!since || since.version !== SNAPSHOT_VERSION || !Array.isArray(since.entries)) return;
+    const rootSet = new Set(roots);
+    // the nearest watched root at or above a path, found by walking up, not by looking at every root
+    const rootOf = (path: string): string | undefined => {
+      for (let p = path; ; p = dirname(p)) {
+        if (rootSet.has(p)) return p;
+        if (dirname(p) === p) return undefined;
+      }
+    };
+    const kept = new Set<string>();
+    // shallow first, so that whether the parent was kept is known
+    const usable = since.entries
+      .filter(isSnapshotEntry)
+      .sort((x, y) => x.path.length - y.path.length);
+    for (const entry of usable) {
+      const root = rootOf(entry.path);
+      if (root === undefined) continue;
+      // below the levels that are descended into now, so it is not scanned and would be reported as unlink
+      if (entry.path.slice(root.length).split(sep).filter(Boolean).length > this.#depth + 1)
+        continue;
+      // an ignored path, or one below an ignored directory, is not scanned: it would be reported as unlink
+      let skipped = false;
+      for (let path = entry.path; !skipped; path = dirname(path)) {
+        skipped = this.#ignored.byPath(path);
+        if (rootSet.has(path) || dirname(path) === path) break;
+      }
+      if (skipped) continue;
+      // below an entry that is missing, it can never be reached from its parent, and would stay in the baseline
+      if (!rootSet.has(entry.path) && !kept.has(dirname(entry.path))) continue;
+      if (entry.dir) kept.add(entry.path);
+      const { dir, mtimeMs, size, ino, link } = entry;
+      this.#setEntry(entry.path, { dir, mtimeMs, size, ino, link });
+    }
   }
 
   add(paths: string | readonly string[]): this {
@@ -290,9 +396,17 @@ export class FSWatcher extends EventEmitter<Events> {
   async close(): Promise<void> {
     this.#closed = true;
     clearTimeout(this.#rescanTimer);
-    for (const job of this.#settling.values()) clearTimeout(job.timer);
+    // what was never reported is not what the snapshot should say the watcher saw
+    for (const [path, job] of this.#settling) {
+      clearTimeout(job.timer);
+      if (job.before) this.#entries.set(path, job.before);
+      else this.#entries.delete(path);
+    }
     this.#settling.clear();
-    for (const timer of this.#unlinks.values()) clearTimeout(timer);
+    for (const [path, { timer, entry }] of this.#unlinks) {
+      clearTimeout(timer);
+      this.#entries.set(path, entry);
+    }
     this.#unlinks.clear();
     for (const watcher of this.#native.values()) watcher.close();
     this.#native.clear();
@@ -313,8 +427,8 @@ export class FSWatcher extends EventEmitter<Events> {
     return timer;
   }
 
-  async #watch(roots: string[]): Promise<ReadyResult> {
-    await this.#start(roots, this.#ignoreInitial ? "quiet" : "initial");
+  async #watch(roots: string[], since = false): Promise<ReadyResult> {
+    await this.#start(roots, since ? "seed" : this.#ignoreInitial ? "quiet" : "initial");
     const missing = [...new Set(roots)].filter((root) => this.#missingAtStart.has(root));
     // not unref'd: a caller awaiting `ready` would otherwise see the process exit before it resolves (exit code 13)
     // fs.watch returns before the OS starts delivering (FSEvents on macOS): a change made in that gap is never reported
@@ -357,8 +471,10 @@ export class FSWatcher extends EventEmitter<Events> {
     const previousProbe = this.#probes.get(root);
     const previousParent = this.#kinds.get(root) === "file" ? dirname(root) : undefined;
     if (mode !== "live") this.#missingAtStart.delete(root);
+    let unreadable = false;
     let info = await this.#stat(root).catch((error: NodeJS.ErrnoException) => {
       this.#fail(error, root);
+      unreadable = !VANISHED.has(error.code ?? "");
       if (mode !== "live" && VANISHED.has(error.code ?? "")) this.#missingAtStart.add(root);
       return undefined;
     });
@@ -371,7 +487,8 @@ export class FSWatcher extends EventEmitter<Events> {
     if (info && !info.isDirectory()) this.#denied.delete(root);
 
     if (!info) {
-      this.#remove(root, true, undefined, true);
+      // a root that cannot be inspected is not known to be gone, and neither is what is below it
+      if (!unreadable) this.#remove(root, true, undefined, mode !== "seed");
       this.#kinds.set(root, "missing");
       const nearest = async (): Promise<string> => {
         let ancestor = dirname(root);
@@ -435,6 +552,24 @@ export class FSWatcher extends EventEmitter<Events> {
     if (previousParent) this.#release(previousParent);
   }
 
+  /**
+   * Forgets what a snapshot put below a link back to an ancestor, which is never descended into: nothing would scan
+   * it, so it would stay in the baseline after the file is gone. What a watched root at or below that path covers is
+   * scanned through that root and keeps its entries, and so do the directories between that path and the root.
+   */
+  #forgetBelow(path: string): void {
+    if (!this.#children.get(path)?.size) return;
+    this.#remove(
+      path,
+      false,
+      (key) =>
+        key !== path &&
+        ![...this.#roots].some(
+          (root) => within(path, root) && (within(root, key) || within(key, root)),
+        ),
+    );
+  }
+
   #stat(path: string): Promise<Stats> {
     return this.#followSymlinks ? stat(path) : lstat(path);
   }
@@ -484,7 +619,12 @@ export class FSWatcher extends EventEmitter<Events> {
               if (!resolved) return;
               real = resolved;
               // a link to a directory already on the way down would loop forever
-              if (ancestry.includes(real)) descend = 0;
+              if (ancestry.includes(real)) {
+                descend = 0;
+                // a link that points somewhere else than before is reported by #visit, with what was below it
+                if (mode === "seed" && this.#entries.get(path)?.link === real)
+                  this.#forgetBelow(path);
+              }
             }
           } else {
             link = await readlink(path).catch((error) => inspectFailed(error, path));
@@ -504,9 +644,10 @@ export class FSWatcher extends EventEmitter<Events> {
         );
       }),
     );
+    if (this.#closed) return;
     for (const path of this.#children.get(dir) ?? []) {
       if (!seen.has(path) && !uninspectable.has(path) && !this.#roots.has(path))
-        this.#remove(path, true, undefined, true);
+        this.#remove(path, true, undefined, mode !== "seed");
     }
     const listed = new Set(names);
     for (const path of this.#denied) {
@@ -522,6 +663,8 @@ export class FSWatcher extends EventEmitter<Events> {
     ancestry: readonly string[] = [],
     link?: string,
   ): Promise<void> {
+    // a scan that was reading when close() was called must not add what was never reported to the baseline
+    if (this.#closed) return;
     const next: Entry = {
       dir: info.isDirectory(),
       mtimeMs: info.mtimeMs,
@@ -536,14 +679,19 @@ export class FSWatcher extends EventEmitter<Events> {
     }
     if (!previous) {
       if (next.dir) this.#flushUnlink(path);
+      // an unlink listener may have closed the watcher: the entry would be in the baseline without being reported
+      if (this.#closed) return;
       this.#setEntry(path, next);
       if (next.dir) {
         if (mode !== "quiet") this.#dispatch("addDir", path);
       } else if (mode === "live" || this.#unlinks.has(path)) this.#announce("add", path);
-      else if (mode === "initial") this.#dispatch("add", path);
+      else if (mode !== "quiet") this.#dispatch("add", path);
       if (next.dir && left > 0) await this.#syncDir(path, left - 1, mode, ancestry);
       return;
     }
+    // a directory remembered from a snapshot has not been read yet
+    if (next.dir && left > 0 && !this.#depthLeft.has(path))
+      await this.#syncDir(path, left - 1, mode, ancestry);
     if (
       !next.dir &&
       (previous.mtimeMs !== next.mtimeMs ||
@@ -552,7 +700,8 @@ export class FSWatcher extends EventEmitter<Events> {
         previous.link !== next.link)
     ) {
       this.#setEntry(path, next);
-      if (mode !== "quiet") this.#announce("change", path);
+      if (mode === "seed") this.#dispatch("change", path);
+      else if (mode !== "quiet") this.#announce("change", path, previous);
     }
   }
 
@@ -574,7 +723,7 @@ export class FSWatcher extends EventEmitter<Events> {
     only: (key: string) => boolean = () => true,
     defer = false,
   ): void {
-    for (const [key, timer] of this.#unlinks) {
+    for (const [key, { timer }] of this.#unlinks) {
       if (!within(path, key) || !only(key) || (report && key === path)) continue;
       clearTimeout(timer);
       this.#unlinks.delete(key);
@@ -584,6 +733,8 @@ export class FSWatcher extends EventEmitter<Events> {
     const keys = [...this.#entries.keys()].filter((key) => within(path, key) && only(key));
     keys.sort((a, b) => b.length - a.length);
     for (const key of keys) {
+      // a listener closed the watcher: what is left was not reported, so it stays for the snapshot
+      if (this.#closed) break;
       const entry = this.#entries.get(key)!;
       const job = this.#settling.get(key);
       clearTimeout(job?.timer);
@@ -600,7 +751,8 @@ export class FSWatcher extends EventEmitter<Events> {
       // an add that never settled was never reported, so there is nothing to take back
       if (!report || job?.event === "add") continue;
       if (entry.dir) this.#dispatch("unlinkDir", key);
-      else if (defer && this.#atomic > 0 && key === path) this.#holdUnlink(key);
+      else if (defer && this.#atomic > 0 && key === path)
+        this.#holdUnlink(key, job?.before ?? entry);
       else this.#dispatch("unlink", key);
     }
   }
@@ -612,36 +764,36 @@ export class FSWatcher extends EventEmitter<Events> {
     if (!this.#closed) this.emit("all", event, path);
   }
 
-  #takeHeld(path: string): boolean {
+  #takeHeld(path: string): Entry | undefined {
     const held = this.#unlinks.get(path);
-    if (!held) return false;
-    clearTimeout(held);
+    if (!held) return undefined;
+    clearTimeout(held.timer);
     this.#unlinks.delete(path);
-    return true;
+    return held.entry;
   }
 
   #flushUnlink(path: string): void {
-    const held = this.#unlinks.get(path);
-    if (!held) return;
-    clearTimeout(held);
-    this.#unlinks.delete(path);
-    this.#dispatch("unlink", path);
+    if (this.#takeHeld(path)) this.#dispatch("unlink", path);
   }
 
-  #holdUnlink(path: string): void {
+  #holdUnlink(path: string, entry: Entry): void {
     const timer = this.#timeout(() => {
       this.#unlinks.delete(path);
       this.#dispatch("unlink", path);
     }, this.#atomic);
-    this.#unlinks.set(path, timer);
+    this.#unlinks.set(path, { timer, entry });
   }
 
-  #announce(event: "add" | "change", path: string): void {
-    if (this.#takeHeld(path)) event = "change";
+  #announce(event: "add" | "change", path: string, before?: Entry): void {
+    const held = this.#takeHeld(path);
+    if (held) event = "change";
     const settle = this.#settle;
     const prior = this.#settling.get(path);
     clearTimeout(prior?.timer);
-    const job: Settling = { event: prior?.event === "add" ? "add" : event };
+    const job: Settling = {
+      event: prior?.event === "add" ? "add" : event,
+      before: prior ? prior.before : (before ?? held),
+    };
     this.#settling.set(path, job);
     if (!settle) {
       // Linux reports a write as truncate then write, and a new file as create then write: one report for the burst
@@ -655,6 +807,10 @@ export class FSWatcher extends EventEmitter<Events> {
     let since = Date.now();
     const poll = async (): Promise<void> => {
       const info = await this.#stat(path).catch(() => undefined);
+      const link =
+        !this.#followSymlinks && info?.isSymbolicLink()
+          ? await readlink(path).catch(() => undefined)
+          : undefined;
       if (this.#settling.get(path) !== job) return;
       // gone: the directory diff reports the unlink, and needs this job to know whether the add was ever announced
       if (!info) return;
@@ -664,6 +820,16 @@ export class FSWatcher extends EventEmitter<Events> {
         since = Date.now();
       } else if (Date.now() - since >= settle.stabilityThreshold) {
         this.#settling.delete(path);
+        // the file may have been written again since the entry was read, with no native event to read it again
+        const entry = this.#entries.get(path);
+        if (entry && !entry.dir)
+          this.#entries.set(path, {
+            ...entry,
+            mtimeMs: info.mtimeMs,
+            size: info.size,
+            ino: info.ino,
+            link: info.isSymbolicLink() ? (link ?? entry.link) : undefined,
+          });
         this.#dispatch(job.event, path);
         return;
       }

@@ -60,6 +60,25 @@ The whole library is `src/index.ts`; the tests are `test/watch.test.ts` and run 
   bind mounts `fs.watch` succeeds and stays silent, so nothing is ever in `#unwatched`.
 - `rescanInterval` chains `setTimeout` from `ready`: the next one is set when `rescan()` has finished, so a slow tree is
   not read back to back. It goes through `#timeout` (unref'd with `persistent: false`) and `close()` clears it.
+- `snapshot()` serializes `#entries` (absolute paths, `{ version: 1, entries }`); `since` seeds `#entries` and
+  `#children` in the constructor, before the first scan, for the roots given to `watch()` only. Entries outside the
+  roots, deeper than `depth`, ignored by path, or below an ignored directory are dropped. The ordinary scan then does
+  the diff in the `seed` mode, which `since` (even `null` or an unusable one) selects, so it overrides `ignoreInitial`.
+  `seed` is `initial` that also reports `change` and `unlink` at once, because they must come before `ready`; `add()`
+  keeps its own mode (`quiet` with `ignoreInitial`, else `initial`), where a `change` is still announced after the quiet
+  period (or `awaitWriteFinish`) and an `unlink` is still held for `atomic`. A `Settling` job for a change keeps `before`, the entry
+  that was last reported, and a held unlink in `#unlinks` keeps its entry; `snapshot()` (and `close()`, which restores
+  them) records those, so a change or unlink that was never reported is reported by the next run. A path whose `add`
+  is still waiting is left out. Seeding keeps an entry only if its parent is a kept directory, so no entry sits below one that is
+  missing, and a scan that is still reading when `close()` is called adds nothing to the baseline (`#visit` returns once
+  closed, also after an `unlink` listener closed it, and so do the removal in `#syncDir` and the loop in `#remove`, which leaves the entries it did not reach). A held unlink keeps
+  `job.before` when the file had a change waiting. A root whose `stat` fails for a reason other than
+  ENOENT/ENOTDIR (permission) keeps what is below it in any mode, instead of reporting it as removed, so `rescan()`
+  does not turn a still unreadable root into `unlink` for every seeded entry. In `seed` mode, `#forgetBelow` drops what was seeded below a link back to an ancestor (never descended into), except what a watched root at or
+  below that path covers (and the directories above that root), and only when the link already pointed there when the snapshot
+  was taken (a retargeted link is reported by `#visit`, with what was below it), so no entry stays that no scan can reach; a directory that was merely not read (`depth`, a
+  permission error) keeps its baseline. The `awaitWriteFinish` poll writes the final stable `stat` (and, with `followSymlinks: false`, the `readlink`) into the entry before it dispatches, so a
+  write that settles after the last scan is what the snapshot records (nothing else reads it again where native events are silent).
 - With `atomic`, the unlink of a file is held back in `#unlinks` for the window, and an `add` announced for the same
   path in that time becomes a `change`. A removed directory reports what is below it at once, flushing held unlinks
   first. `atomic` also adds the editor temporary file patterns to `ignored`.
