@@ -480,13 +480,16 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       Array.from(children.get(dir) ?? [], async (path) => {
         if (seen.has(path) || uninspectable.has(path) || watchedRoots.has(path)) return;
         if (!covered() || !children.get(dir)?.has(path)) return;
-        // the siblings may have taken long: a file that was missing at its read can be back and reported since then
-        if ((await examine(path)) || closed) return;
-        // what was true before the check may not be any more: `add()` can have made the path a root of its own
-        if (watchedRoots.has(path) || !covered() || !children.get(dir)?.has(path)) return;
-        // a refused read does not keep a name the listing did not have (a directory that is being deleted can refuse one),
-        // but a name it had, whose first read found it missing, is not known to be gone
-        if (listed.has(basename(path)) && uninspectable.has(path)) return;
+        // The siblings may have taken long: a file that was missing at its read can be back and reported since then. Not
+        // a directory: one that is being deleted can still be read, and keeping it would keep its native watcher open.
+        if (entries.get(path)?.dir === false) {
+          if ((await examine(path)) || closed) return;
+          // what was true before the check may not be any more: `add()` can have made the path a root of its own
+          if (watchedRoots.has(path) || !covered() || !children.get(dir)?.has(path)) return;
+          // a refused read does not keep a name the listing did not have (a directory that is being deleted can refuse one),
+          // but a name it had, whose first read found it missing, is not known to be gone
+          if (listed.has(basename(path)) && uninspectable.has(path)) return;
+        }
         remove(path, true, undefined, mode !== "seed");
       }),
     );
