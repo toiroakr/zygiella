@@ -107,6 +107,7 @@ A path that cannot be read because of permissions is not in `missing`; it is emi
 | `awaitWriteFinish`       | `false`   | `true` or `{ stabilityThreshold, pollInterval }` in ms (defaults 2000 and 100). Holds `add` and `change` back until size and mtime stop changing.                                                                                                                                                                                                                                                                                                                      |
 | `ignorePermissionErrors` | `false`   | Skip directories that cannot be read (`EACCES`, `EPERM`) silently. Otherwise each is emitted once as `error`.                                                                                                                                                                                                                                                                                                                                                          |
 | `persistent`             | `true`    | With `false`, the watcher does not keep the process alive: a process with nothing else to do exits without `close()`. Events are still reported while something else keeps the process running.                                                                                                                                                                                                                                                                        |
+| `rescanInterval`         | `0`       | Call `rescan()` every this many ms (the wait starts when the previous read is done), from `ready` until `close()`. For file systems where `fs.watch` reports nothing. With `persistent: false` the timer does not keep the process alive. `0`: no timer. See [Environments without native events](#environments-without-native-events).                                                                                                                                |
 
 ### Events
 
@@ -163,25 +164,34 @@ may not work at all. The watcher then stays silent while files change. Options, 
 
 1. Watch on the host and forward the change into the container, for example with `docker compose watch`.
 2. On WSL2, keep the project in the Linux file system (`~/project`) instead of `/mnt/c/...`.
-3. Call `rescan()` yourself. It reads every watched path and every directory descended into right now, and reports
-   the difference with the same events as a native notification. zygiella has no polling of its own, so choose
-   how often:
+3. Set `rescanInterval`. zygiella then calls `rescan()` for you, which reads every watched path and every directory
+   descended into and reports the difference with the same events as a native notification. This is not polling
+   in place of `fs.watch`: the native watches stay, and the timer only adds reads.
 
 ```ts
-const watcher = watch("src", { ignoreInitial: true });
+const watcher = watch("src", { ignoreInitial: true, rescanInterval: 2000 });
 watcher.on("error", (error) => console.error(error));
-const timer = setInterval(() => void watcher.rescan(), 2000);
 
 // when you are done
-clearInterval(timer);
 await watcher.close();
 ```
 
-`rescan()` also tries again to watch a directory that is in `watcher.unwatched` (see [Behavior](#behavior)).
+The first read comes `rescanInterval` ms after `ready`, and each next one that long after the previous read has
+finished, so a tree that takes 3 s to read with `rescanInterval: 2000` is read every 5 s, not back to back. `close()`
+stops the timer. With `persistent: false` the timer is unref'd, like the `fs.watch` handles. A `setInterval` of your
+own is not: `watch(dir, { persistent: false })` with `setInterval(() => void watcher.rescan(), 2000)` keeps the
+process running forever, and it keeps running after `close()` unless you `clearInterval` it too.
+
+`rescanInterval` reads the whole tree, not only `watcher.unwatched`. On the file systems above `fs.watch` succeeds and
+simply stays silent, so no directory is in `unwatched`, and reading only those would find nothing. When you only want
+`unwatched` (see [Behavior](#behavior)) tried again, for example after raising `fs.inotify.max_user_watches`, call
+`rescan()` yourself; it also tries to watch those directories again, and so does the timer.
+
 `rescan()` resolves once the directories have been read. `add` and `change` are reported after the usual wait
-(50 ms of quiet, or `awaitWriteFinish`), so they can arrive after the promise resolves. A call made while a read is
-running does not report the same change twice, and after `close()` it does nothing. Every call reads the whole
-tree, so keep the interval long for a large one.
+(50 ms of quiet, or `awaitWriteFinish`), so they can arrive after the promise resolves. A `rescan()` call made while
+a read is running does not report the same change twice, and after `close()` it does nothing. Every read covers the
+whole tree, so keep the interval long for a large one. `rescanInterval` must be a number from 0 to 2147483647; any other number, and any value that is not a number
+(including `false` and a numeric string), throws a `RangeError`. `undefined` and `null` mean the default, 0.
 
 ## Behavior
 
@@ -208,7 +218,7 @@ tree, so keep the interval long for a large one.
   reports an error and cannot be set up again. zygiella does not retry by itself: `rescan()` reads the directory
   again, reports what changed, and tries to watch it again, after which it leaves `unwatched`. If it still fails,
   `error` is emitted again (except a permission error, which follows the rules below). Raise the limit (on Linux, `fs.inotify.max_user_watches` and
-  `fs.inotify.max_user_instances`; `ulimit -n` for open files), or call `rescan()` on a timer as described in
+  `fs.inotify.max_user_instances`; `ulimit -n` for open files), or set `rescanInterval` as described in
   [Environments without native events](#environments-without-native-events).
 - Nothing above a watched path is watched. A link given to `watch()`, or a link whose target is outside the watched
   tree, is not noticed when the link is replaced or when its target is deleted and created again.
@@ -223,8 +233,8 @@ tree, so keep the interval long for a large one.
 - Paths are always absolute, with the platform's separator (`C:\work\src\a.ts` on Windows). A function or string
   in `ignored` receives them in that form; a RegExp is tested against the path with `/` as the separator, as in
   chokidar. A RegExp written for `\\` only (`/src\\gen/`) no longer matches on Windows; `[\\/]` still does.
-- No `usePolling`, `cwd`, `alwaysStat`, and no `stats` argument on events. `rescan()` is the substitute for
-  polling, called by you.
+- No `usePolling`, `cwd`, `alwaysStat`, and no `stats` argument on events. `rescanInterval` (or `rescan()`, called by you) is the
+  substitute for polling: it reads the tree again and keeps `fs.watch` in place, instead of replacing it.
 - `persistent: false` is supported, with one difference: `ready` still resolves when nothing else keeps the process alive, because its short settle wait is not unref'd.
 - `change` events are coalesced as described above, so a rapid second write may not produce a second event.
 

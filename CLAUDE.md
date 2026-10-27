@@ -7,9 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `zygiella` is a dependency-free file watcher for Node.js built on `fs.watch`. It implements the subset of the
 chokidar API that most tools use: `watch(paths, options)`, the `FSWatcher` events (`add`, `addDir`, `change`,
 `unlink`, `unlinkDir`, `all`, `ready`, `error`) and methods (`add`, `unwatch`, `rescan`, `close`), and the options
-`ignored`, `ignoreInitial`, `depth`, `followSymlinks`, `atomic`, `awaitWriteFinish`, `persistent` and `ignorePermissionErrors`. Do
-not add the rest of chokidar's surface (globs, polling, `cwd`, `stats`); being small is the point. `rescan()` is not polling: it runs only when the user calls
-it, so an interval is the user's to write.
+`ignored`, `ignoreInitial`, `depth`, `followSymlinks`, `atomic`, `awaitWriteFinish`, `persistent`, `rescanInterval` and `ignorePermissionErrors`. Do
+not add the rest of chokidar's surface (globs, polling, `cwd`, `stats`); being small is the point. `rescan()` is not polling, and `rescanInterval` only calls it on a timer:
+`fs.watch` stays in place, unlike chokidar's `backend: 'polling'`, which replaces it.
 
 ## Planning
 
@@ -56,7 +56,10 @@ The whole library is `src/index.ts`; the tests are `test/watch.test.ts` and run 
 - A directory whose `fs.watch` threw (`ENOSPC`, `EMFILE`) or whose native watcher reported an error and could not be
   set up again is kept in `#unwatched` (public: `unwatched`) and reported as `error`. It is still read once, so what exists at that moment
   is reported; later changes are missed. `rescan()` reaches `#ensureNative` for every directory, so it is also what watches it again;
-  there is no timer, because retrying on an interval is the caller's `setInterval`, as with `rescan()` itself.
+  the timer is `rescanInterval`, off by default. It reads the whole tree, not only `#unwatched`, because on NFS and Docker
+  bind mounts `fs.watch` succeeds and stays silent, so nothing is ever in `#unwatched`.
+- `rescanInterval` chains `setTimeout` from `ready`: the next one is set when `rescan()` has finished, so a slow tree is
+  not read back to back. It goes through `#timeout` (unref'd with `persistent: false`) and `close()` clears it.
 - With `atomic`, the unlink of a file is held back in `#unlinks` for the window, and an `add` announced for the same
   path in that time becomes a `change`. A removed directory reports what is below it at once, flushing held unlinks
   first. `atomic` also adds the editor temporary file patterns to `ignored`.
