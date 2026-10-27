@@ -99,11 +99,14 @@ async function until(predicate: () => boolean, ms = 3000): Promise<void> {
   }
 }
 
-/** Writes `file` again until `reported()`: the OS may not deliver yet for a watch that was just attached. */
+/**
+ * Writes `file` again until `reported()`: the OS may not deliver yet for a watch that was just attached. The pause is
+ * longer than the 50 ms of quiet an add or change waits for, or the writes would keep postponing the report.
+ */
 async function writeUntil(file: string, reported: () => boolean): Promise<void> {
-  for (let i = 0; !reported() && i < 100; i++) {
+  for (let i = 0; !reported() && i < 50; i++) {
     await writeFile(file, String(i));
-    await new Promise((r) => setTimeout(r, 30));
+    await new Promise((r) => setTimeout(r, 120));
   }
   expect(reported()).toBe(true);
 }
