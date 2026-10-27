@@ -151,7 +151,13 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   async function unsettled<T>(path: string, read: () => Promise<T>): Promise<T> {
     for (;;) {
       const before = settles.get(path);
-      const result = await read();
+      let result: T;
+      try {
+        result = await read();
+      } catch (error) {
+        if (settles.get(path) === before) throw error;
+        continue;
+      }
       if (settles.get(path) === before) return result;
     }
   }
@@ -345,20 +351,21 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     mode: Mode,
   ): Promise<{ info: Stats | undefined; link: string | undefined; unreadable: boolean }> {
     let unreadable = false;
-    let info = await unsettled(root, () => followStat(root)).catch(
-      (error: NodeJS.ErrnoException) => {
-        fail(error, root);
-        unreadable = !VANISHED.has(error.code ?? "");
-        if (mode !== "live" && VANISHED.has(error.code ?? "")) missingAtStart.add(root);
-        return undefined;
-      },
-    );
-    let link: string | undefined;
-    if (!followSymlinks && info?.isSymbolicLink()) {
-      link = await readlink(root).catch(() => undefined);
-      if (link === undefined) info = undefined;
-    }
-    return { info, link, unreadable };
+    const read = await unsettled(root, async () => {
+      const info = await followStat(root);
+      const link =
+        !followSymlinks && info.isSymbolicLink()
+          ? await readlink(root).catch(() => undefined)
+          : undefined;
+      return { info, link };
+    }).catch((error: NodeJS.ErrnoException) => {
+      fail(error, root);
+      unreadable = !VANISHED.has(error.code ?? "");
+      if (mode !== "live" && VANISHED.has(error.code ?? "")) missingAtStart.add(root);
+      return undefined;
+    });
+    const gone = !!read && !followSymlinks && read.info.isSymbolicLink() && read.link === undefined;
+    return { info: gone ? undefined : read?.info, link: read?.link, unreadable };
   }
 
   /** Watches the nearest directory that exists, so that the root is seen when it is created. */
@@ -481,18 +488,23 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     failed: Failed,
   ): Promise<Found | undefined> {
     if (ignored.byPath(path)) return;
-    const own = await unsettled(path, () => lstat(path)).catch((error) => failed(error, path));
-    if (!own) return;
+    const read = await unsettled(path, async () => {
+      const own = await lstat(path);
+      return {
+        own,
+        link: !followSymlinks && own.isSymbolicLink() ? await readlink(path) : undefined,
+      };
+    }).catch((error) => failed(error, path));
+    if (!read) return;
+    const { own } = read;
     let found: Found | undefined = {
       info: own,
       real: join(ancestry.at(-1)!, basename(path)),
-      link: undefined,
+      link: read.link,
       descend: left,
     };
-    if (own.isSymbolicLink()) {
-      found = followSymlinks
-        ? await followLink(path, found, mode, ancestry, failed)
-        : await readLink(path, found, failed);
+    if (own.isSymbolicLink() && followSymlinks) {
+      found = await followLink(path, found, mode, ancestry, failed);
       if (!found) return;
     }
     if (own.isSymbolicLink() || !found.info.isDirectory()) denied.delete(path);
@@ -517,11 +529,6 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     // a link that points somewhere else than before is reported by `visit`, with what was below it
     if (mode === "seed" && entries.get(path)?.link === real) forgetBelow(path);
     return { ...found, info, real, descend: 0 };
-  }
-
-  async function readLink(path: string, found: Found, failed: Failed): Promise<Found | undefined> {
-    const link = await readlink(path).catch((error) => failed(error, path));
-    return link === undefined ? undefined : { ...found, link };
   }
 
   async function visit(
