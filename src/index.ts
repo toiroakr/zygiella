@@ -99,6 +99,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   const denied = new Set<string>();
   const missingAtStart = new Set<string>();
   const settles = new Map<string, number>();
+  // one count for all paths: a count per path that `remove` resets could reach again the value a read still in flight took
+  let settleCount = 0;
   let rescanTimer: NodeJS.Timeout | undefined;
   let closed = false;
   let ready: Promise<ReadyResult>;
@@ -133,7 +135,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   function settled(path: string, info: Stats, link: string | undefined): void {
     const entry = entries.get(path);
     if (entry && !entry.dir) {
-      settles.set(path, (settles.get(path) ?? 0) + 1);
+      settles.set(path, ++settleCount);
       entries.set(path, {
         ...entry,
         mtimeMs: info.mtimeMs,
