@@ -29,6 +29,8 @@ export type {
 const READY_SETTLE_MS = 50;
 // above this many entries a native event is trusted for the name it carries instead of reading the whole directory
 const LARGE_DIRECTORY = 1000;
+// such a directory is read whole once its events have stopped for this long, so an event that was lost is repaired
+const AUDIT_QUIET_MS = 1000;
 const differs = (previous: Entry, next: Entry): boolean =>
   previous.mtimeMs !== next.mtimeMs ||
   previous.size !== next.size ||
@@ -107,6 +109,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   const queues = new Map<string, { dirty: boolean; done: Promise<void> }>();
   const denied = new Set<string>();
   const missingAtStart = new Set<string>();
+  const audits = new Map<string, NodeJS.Timeout>();
   let rescanTimer: NodeJS.Timeout | undefined;
   let closed = false;
   let ready: Promise<ReadyResult>;
@@ -245,6 +248,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   async function close(): Promise<void> {
     closed = true;
     clearTimeout(rescanTimer);
+    for (const timer of audits.values()) clearTimeout(timer);
+    audits.clear();
     pending.close(entries);
     natives.close();
     await Promise.all([...queues.values()].map((q) => q.done));
@@ -700,13 +705,39 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
 
   const isLarge = (dir: string): boolean => (children.get(dir)?.size ?? 0) > LARGE_DIRECTORY;
 
+  /** Reads `dir` whole once nothing has been reported for it for `AUDIT_QUIET_MS`. */
+  function audit(dir: string): void {
+    clearTimeout(audits.get(dir));
+    audits.set(
+      dir,
+      timeout(() => {
+        audits.delete(dir);
+        const left = depthLeft.get(dir);
+        const ancestry = ancestries.get(dir);
+        if (closed) return;
+        if (watchedRoots.has(dir)) void serial(`root:${dir}`, () => syncRoot(dir, "live"));
+        else if (left !== undefined && ancestry)
+          void serial(`dir:${dir}`, () => syncDir(dir, left, "live", ancestry));
+      }, AUDIT_QUIET_MS),
+    );
+  }
+
   function onNative(dir: string, name?: string): void {
     if (closed) return;
     const left = depthLeft.get(dir);
     const ancestry = ancestries.get(dir);
-    // a root is named like itself when it is the one that went away, so only another name is a hint
-    if (name && left !== undefined && ancestry && isLarge(dir) && name !== basename(dir)) {
+    // a name that is a watched root is read with the root, and a root is named like itself when it is the one that
+    // went away, so any other name is a hint
+    if (
+      name &&
+      left !== undefined &&
+      ancestry &&
+      isLarge(dir) &&
+      name !== basename(dir) &&
+      !watchedRoots.has(join(dir, name))
+    ) {
       void serial(`entry:${join(dir, name)}`, () => syncName(dir, name, left, "live", ancestry));
+      audit(dir);
       return;
     }
     for (const root of watchedRoots) {

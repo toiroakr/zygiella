@@ -50,7 +50,8 @@ set), `pending.ts` (add / change waiting to settle and unlinks held for `atomic`
   falls back to one watch per directory. Native events are not trusted for their type: every event re-reads the
   directory and diffs it against a snapshot (`entries`), and the diff produces the reports. This absorbs coalesced
   and duplicated events on every platform. Only in a directory with more than `LARGE_DIRECTORY` entries is the name
-  of the event trusted (`syncName`), because the full read costs 0.2 to 1 s there.
+  of the event trusted (`syncName`), because the full read costs 0.2 to 1 s there; `audit` reads that directory whole
+  once `AUDIT_QUIET_MS` after its last event, which is what repairs an event the OS lost.
 - A native watcher error is retried by one re-sync of its directory, except `EMFILE` / `ENOSPC` and the fourth error
   in a row without an event (`native.ts`); a re-watch after `EMFILE` on macOS made libuv rebuild its one stream for
   every handle, and the process never reached `ready`.

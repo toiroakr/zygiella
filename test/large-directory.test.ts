@@ -1,10 +1,33 @@
 import { mkdir, mkdtemp, realpath, rm as removeOnce, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 // only readdir is wrapped, to count how often a directory is read; everything else is the real file system
 const reads = vi.hoisted(() => new Map<string, number>());
+// names whose native events are swallowed, as when the OS drops or coalesces one
+const dropped = vi.hoisted(() => new Set<string>());
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    watch: ((...args: Parameters<typeof actual.watch>) => {
+      const watcher = actual.watch(...args);
+      const on = watcher.on.bind(watcher);
+      watcher.on = ((event: string, listener: (...rest: unknown[]) => void) =>
+        on(
+          event,
+          event === "change"
+            ? (type: unknown, name: unknown) => {
+                if (!dropped.has(basename(String(name)))) listener(type, name);
+              }
+            : listener,
+        )) as typeof watcher.on;
+      return watcher;
+    }) as typeof actual.watch,
+  };
+});
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -35,6 +58,7 @@ beforeEach(async () => {
   await Promise.all(Array.from({ length: LARGE }, (_, i) => writeFile(join(big, `f${i}`), "1")));
   watchers = [];
   reads.clear();
+  dropped.clear();
 });
 
 afterEach(async () => {
@@ -123,6 +147,47 @@ describe("a directory with many entries", () => {
     await until(() => seen.length > 0);
     expect(seen).toEqual([["change", join(big, "f0")]]);
     expect(reads.get(big)).toBe(before);
+  });
+});
+
+describe("once the events of a directory with many entries have stopped", () => {
+  test("the directory is read again once, however many events there were", async () => {
+    const { seen } = await start(dir);
+    await quiet();
+    const before = reads.get(big) ?? 0;
+    for (const name of ["f0", "f1", "f2"]) await writeFile(join(big, name), "22");
+    await until(() => seen.length >= 3);
+    await until(() => reads.get(big) === before + 1, 4000);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(reads.get(big)).toBe(before + 1);
+  });
+
+  test("an entry whose event was lost is reported", async () => {
+    const { seen } = await start(dir);
+    dropped.add("ghost");
+    await writeFile(join(big, "ghost"), "1");
+    await writeFile(join(big, "f0"), "22");
+    await until(() => seen.some(([, path]) => path === join(big, "ghost")), 4000);
+    expect(seen).toContainEqual(["add", join(big, "ghost")]);
+  });
+
+  test("an entry whose event was lost is reported when the directory is the watched root", async () => {
+    const { seen } = await start(big);
+    dropped.add("ghost");
+    await writeFile(join(big, "ghost"), "1");
+    await writeFile(join(big, "f0"), "22");
+    await until(() => seen.some(([, path]) => path === join(big, "ghost")), 4000);
+    expect(seen).toContainEqual(["add", join(big, "ghost")]);
+  });
+
+  test("a file that is itself a watched path is reported as removed", async () => {
+    const { seen } = await start(dir);
+    const file = join(big, "f5");
+    const watcher = watchers[0]!;
+    await watcher.add(file).ready;
+    await rm(file);
+    await until(() => seen.some(([event]) => event === "unlink"));
+    expect(seen).toEqual([["unlink", file]]);
   });
 });
 
