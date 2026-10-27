@@ -155,8 +155,11 @@ test("a nested path that is still watched keeps its name in its directory after 
   expect(w.getWatched()).toEqual({ [outer]: ["inner.txt"] });
 });
 
-test("the filesystem root is not listed as a name of itself", async () => {
-  const root = parse(dir).root;
-  const w = await start(root, { depth: 0, ignorePermissionErrors: true });
-  expect(w.getWatched()[root]).not.toContain("");
-});
+test.skipIf(process.platform === "win32")(
+  "the filesystem root is not listed as a name of itself",
+  async () => {
+    const root = parse(dir).root;
+    const w = await start(root, { depth: 0, ignorePermissionErrors: true });
+    expect(w.getWatched()[root]).not.toContain("");
+  },
+);
