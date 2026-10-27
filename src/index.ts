@@ -481,6 +481,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
         if (!covered() || !children.get(dir)?.has(path)) return;
         // the siblings may have taken long: a file that was missing at its read can be back and reported since then
         if ((await examine(path)) || closed) return;
+        // what was true before the check may not be any more: `add()` can have made the path a root of its own
+        if (watchedRoots.has(path) || !covered() || !children.get(dir)?.has(path)) return;
         // not `uninspectable`: the listing did not have the name, and a directory that is being deleted can refuse a read
         remove(path, true, undefined, mode !== "seed");
       }),
