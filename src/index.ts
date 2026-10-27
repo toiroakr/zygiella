@@ -140,8 +140,12 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     if (closed) return watched;
     const dirs = new Set(depthLeft.keys());
     for (const root of watchedRoots) dirs.add(dirname(root));
-    for (const dir of [...dirs].sort())
-      watched[dir] = [...(children.get(dir) ?? [])].map((path) => basename(path)).sort();
+    for (const dir of [...dirs].sort()) watched[dir] = [];
+    for (const path of entries.keys()) {
+      const dir = dirname(path);
+      if (path !== dir) watched[dir]?.push(basename(path));
+    }
+    for (const names of Object.values(watched)) names.sort();
     return watched;
   }
 

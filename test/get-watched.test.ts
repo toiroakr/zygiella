@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, realpath, rm as removeOnce, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, parse } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { watch, type FSWatcher } from "../src/index.ts";
 
@@ -144,4 +144,19 @@ test("nothing is listed after close()", async () => {
   const w = await start(dir);
   await w.close();
   expect(w.getWatched()).toEqual({});
+});
+
+test("a nested path that is still watched keeps its name in its directory after unwatch() of the ancestor", async () => {
+  const outer = join(dir, "outer");
+  await mkdir(outer);
+  await writeFile(join(outer, "inner.txt"), "");
+  const w = await start([outer, join(outer, "inner.txt")]);
+  w.unwatch(outer);
+  expect(w.getWatched()).toEqual({ [outer]: ["inner.txt"] });
+});
+
+test("the filesystem root is not listed as a name of itself", async () => {
+  const root = parse(dir).root;
+  const w = await start(root, { depth: 0, ignorePermissionErrors: true });
+  expect(w.getWatched()[root]).not.toContain("");
 });
