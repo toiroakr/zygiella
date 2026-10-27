@@ -31,6 +31,7 @@ test("watch() returns an EventEmitter that has every method chokidar's FSWatcher
     "rescan",
     "close",
     "snapshot",
+    "getWatched",
   ])
     expect(typeof watcher[method as keyof FSWatcher], method).toBe("function");
 });

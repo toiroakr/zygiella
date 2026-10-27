@@ -63,6 +63,13 @@ export interface FSWatcher extends EventEmitter<Events> {
    * `atomic`, is recorded as it was before, so the next run reports that too.
    */
   snapshot(): Snapshot;
+  /**
+   * The directories that are read, as absolute paths, each with the sorted names of what is watched directly in
+   * it: files and directories, but not what `ignored` skips. A directory at the `depth` limit is a name in its
+   * parent but not a key. The directory of each path given to `watch()` or `add()` is a key too, so a file given
+   * directly is listed under its directory. Empty after `close()`.
+   */
+  getWatched(): Record<string, string[]>;
   add(paths: string | readonly string[]): this;
   unwatch(paths: string | readonly string[]): this;
   /**
@@ -126,6 +133,16 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     }
     for (const [path, entry] of pending.heldEntries()) recordedEntries.push(recorded(path, entry));
     return toSnapshot(recordedEntries);
+  }
+
+  function getWatched(): Record<string, string[]> {
+    const watched: Record<string, string[]> = {};
+    if (closed) return watched;
+    const dirs = new Set(depthLeft.keys());
+    for (const root of watchedRoots) dirs.add(dirname(root));
+    for (const dir of [...dirs].sort())
+      watched[dir] = [...(children.get(dir) ?? [])].map((path) => basename(path)).sort();
+    return watched;
   }
 
   /** The file settled at this size and mtime: the entry may not know yet, as no native event reads it again. */
@@ -651,6 +668,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     ready: { get: () => ready, configurable: true },
     unwatched: { get: () => natives.unwatched(), configurable: true },
     snapshot: { value: snapshot, writable: true, configurable: true },
+    getWatched: { value: getWatched, writable: true, configurable: true },
     add: { value: add, writable: true, configurable: true },
     unwatch: { value: unwatch, writable: true, configurable: true },
     rescan: { value: rescan, writable: true, configurable: true },
