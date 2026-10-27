@@ -1,4 +1,4 @@
-import { mkdtemp, realpath, rm as removeOnce, symlink, unlink, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rename, rm as removeOnce, symlink, writeFile } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -62,11 +62,14 @@ test.skipIf(process.platform === "win32")(
     const seen: string[] = [];
     watcher.on("change", (path) => seen.push(path));
     await watcher.ready;
-    await unlink(join(dir, "link"));
-    await symlink(join(dir, "t22"), join(dir, "link"));
+    // replaced in one step: a gap with no link would let the poll see ENOENT and stop, with no native event to restart it
+    const retarget = async (target: string) => {
+      await symlink(target, join(dir, ".next-link"));
+      await rename(join(dir, ".next-link"), join(dir, "link"));
+    };
+    await retarget(join(dir, "t22"));
     await watcher.rescan();
-    await unlink(join(dir, "link"));
-    await symlink(join(dir, "t333"), join(dir, "link"));
+    await retarget(join(dir, "t333"));
     await until(() => seen.length > 0);
     const entry = watcher.snapshot().entries.find((e) => e.path === join(dir, "link"));
     expect(entry?.link).toBe(join(dir, "t333"));
