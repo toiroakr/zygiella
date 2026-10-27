@@ -18,6 +18,8 @@ const native = vi.hoisted(() => ({
   sizesRead: [] as number[],
   linksRead: [] as string[],
   watched: "",
+  refreshGate: Promise.resolve(),
+  releaseRefresh: () => {},
   holdNext: false,
   rejectHeld: false,
   held: false,
@@ -35,6 +37,12 @@ const native = vi.hoisted(() => ({
     native.held = false;
     native.gate = new Promise<void>((resolve) => {
       native.open = resolve;
+    });
+  },
+  // the read at the end of the quiet period is kept back until the test has finished writing, or it could see a half-written file
+  holdRefresh() {
+    native.refreshGate = new Promise<void>((resolve) => {
+      native.releaseRefresh = resolve;
     });
   },
   async pause(kind: "stat" | "readlink") {
@@ -62,24 +70,30 @@ vi.mock("node:fs", async (importOriginal) => {
   };
 });
 
-// the sizes the watcher read for the watched file, so the test can wait for the read that saw the truncated file
+// the sizes the scans read for the watched file, so the test can wait for the read that saw the truncated file
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
+  const isRefresh = (path: string) =>
+    path === native.watched && (new Error().stack ?? "").includes("pending.ts");
   const recording = (read: typeof actual.stat): typeof actual.stat =>
     (async (path: string, ...rest: unknown[]) => {
+      const refresh = isRefresh(path);
+      if (refresh) await native.refreshGate;
       const info = await (read as (...args: unknown[]) => Promise<{ size: number }>)(path, ...rest);
-      if (path === native.watched) {
+      if (path === native.watched && !refresh) {
         native.sizesRead.push(info.size);
         await native.pause("stat");
       }
       return info;
     }) as typeof actual.stat;
   const pausing = (async (path: string, ...rest: unknown[]) => {
+    const refresh = isRefresh(path);
+    if (refresh) await native.refreshGate;
     const target = await (actual.readlink as (...args: unknown[]) => Promise<string>)(
       path,
       ...rest,
     );
-    if (path === native.watched) {
+    if (path === native.watched && !refresh) {
       native.linksRead.push(target);
       await native.pause("readlink");
     }
@@ -113,10 +127,13 @@ beforeEach(async () => {
   native.rejectHeld = false;
   native.held = false;
   native.open = () => {};
+  native.refreshGate = Promise.resolve();
+  native.releaseRefresh = () => {};
 });
 
 afterEach(async () => {
   native.open();
+  native.releaseRefresh();
   await Promise.all(watchers.map((w) => w.close()));
   await rm(dir, { recursive: true, force: true });
 });
@@ -154,10 +171,12 @@ describe("a write whose native event arrives after the quiet period", () => {
     const file = join(dir, "a.txt");
     const { w, seen } = await watching(dir, file);
 
+    native.holdRefresh();
     await writeFile(file, "");
     native.deliver();
     await until(() => native.sizesRead.includes(0));
     await writeFile(file, "22");
+    native.releaseRefresh();
     await until(() => seen.length > 0);
 
     expect(await sizeLastReportedAfterLateEvent(w, file)).toBe(2);
@@ -169,10 +188,12 @@ describe("a write whose native event arrives after the quiet period", () => {
     await writeFile(file, "1");
     const { w, seen } = await watching(file, file);
 
+    native.holdRefresh();
     await truncate(file, 0);
     native.deliver();
     await until(() => native.sizesRead.includes(0));
     await writeFile(file, "22");
+    native.releaseRefresh();
     await until(() => seen.length > 0);
 
     expect(await sizeLastReportedAfterLateEvent(w, file)).toBe(2);
@@ -186,6 +207,7 @@ describe("a read of the file that completes after the change was reported", () =
     await writeFile(file, "1");
     const { w, seen } = await watching(file, file);
 
+    native.holdRefresh();
     await truncate(file, 0);
     native.deliver();
     await until(() => native.sizesRead.includes(0));
@@ -193,6 +215,7 @@ describe("a read of the file that completes after the change was reported", () =
     native.deliver();
     await until(() => native.held);
     await writeFile(file, "22");
+    native.releaseRefresh();
     await until(() => seen.length > 0);
     const reads = native.sizesRead.length;
     native.open();
@@ -207,6 +230,7 @@ describe("a read of the file that completes after the change was reported", () =
     await writeFile(file, "1");
     const { w, seen } = await watching(dir, file);
 
+    native.holdRefresh();
     await truncate(file, 0);
     native.deliver();
     await until(() => native.sizesRead.includes(0));
@@ -214,6 +238,7 @@ describe("a read of the file that completes after the change was reported", () =
     native.deliver();
     await until(() => native.held);
     await writeFile(file, "22");
+    native.releaseRefresh();
     await until(() => seen.length > 0);
     const reads = native.sizesRead.length;
     native.open();
@@ -234,6 +259,7 @@ describe("a read of the file that completes after the change was reported", () =
       await symlink(join(dir, "first"), link);
       const { w, seen } = await watching(link, link, { followSymlinks: false });
 
+      native.holdRefresh();
       const linksBefore = native.linksRead.length;
       await replaceLink(join(dir, "second"));
       native.deliver();
@@ -242,6 +268,7 @@ describe("a read of the file that completes after the change was reported", () =
       native.deliver();
       await until(() => native.held);
       await replaceLink(join(dir, "third"));
+      native.releaseRefresh();
       await until(() => seen.length > 0);
       const reads = native.linksRead.length;
       native.open();
