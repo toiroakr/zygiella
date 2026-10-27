@@ -84,7 +84,7 @@ test.skipIf(process.platform === "win32")(
     watcher = watch(dir, {
       ignoreInitial: true,
       followSymlinks: false,
-      awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 20 },
+      awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 20 },
     });
     const seen: string[] = [];
     watcher.on("change", (path) => seen.push(path));
@@ -96,6 +96,8 @@ test.skipIf(process.platform === "win32")(
     await rename(join(dir, ".next-file"), join(dir, "link"));
     await until(() => seen.length > 0);
     const entry = watcher.snapshot().entries.find((e) => e.path === join(dir, "link"));
+    expect(entry).toBeDefined();
+    expect(entry?.dir).toBe(false);
     expect(entry?.link).toBeUndefined();
   },
 );
