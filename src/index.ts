@@ -87,7 +87,7 @@ interface Settling {
 const QUIET_MS = 50;
 const READY_SETTLE_MS = 50;
 const ATOMIC_MS = 100;
-// setTimeout takes a longer delay as 1 ms
+// setTimeout treats a delay above 2 ** 31 - 1 as 1 ms
 const MAX_TIMER_MS = 2 ** 31 - 1;
 const EDITOR_TEMP = /\..*\.(sw[px])$|~$|\.subl.*\.tmp/;
 
