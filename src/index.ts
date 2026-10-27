@@ -454,9 +454,12 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       if (!VANISHED.has(error.code ?? "")) uninspectable.add(path);
       return undefined;
     };
+    const covered = () => [...watchedRoots].some((root) => within(root, dir));
     const examine = async (path: string): Promise<boolean> => {
       const found = await inspect(path, left, mode, ancestry, failed);
       if (!found) return false;
+      // an unlink listener may have unwatched the directory while the read was in flight
+      if (closed || !covered()) return true;
       seen.add(path);
       await visit(
         path,
@@ -470,13 +473,18 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     };
     await Promise.all(names.map((name) => examine(join(dir, name))));
     if (closed) return;
-    for (const path of Array.from(children.get(dir) ?? [])) {
-      if (seen.has(path) || uninspectable.has(path) || watchedRoots.has(path)) continue;
-      // the siblings may have taken long: a file that was missing at its read can be back and reported since then
-      if (await examine(path)) continue;
-      if (closed) return;
-      if (!uninspectable.has(path)) remove(path, true, undefined, mode !== "seed");
-    }
+    // One name at a time would make a bulk removal wait for a round trip per file, and waiting for all of them before
+    // removing any would leave the window open again, so each is removed as soon as its own check is done.
+    await Promise.all(
+      Array.from(children.get(dir) ?? [], async (path) => {
+        if (seen.has(path) || uninspectable.has(path) || watchedRoots.has(path)) return;
+        if (!covered() || !children.get(dir)?.has(path)) return;
+        // the siblings may have taken long: a file that was missing at its read can be back and reported since then
+        if ((await examine(path)) || closed || uninspectable.has(path)) return;
+        remove(path, true, undefined, mode !== "seed");
+      }),
+    );
+    if (closed) return;
     const listed = new Set(names);
     for (const path of denied) {
       if (dirname(path) === dir && !listed.has(basename(path))) denied.delete(path);
