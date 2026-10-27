@@ -648,8 +648,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       void serial(`dir:${dir}`, () => syncDir(dir, left, "live", ancestry));
   }
   const watcher = Object.defineProperties(emitter, {
-    ready: { get: () => ready },
-    unwatched: { get: () => natives.unwatched() },
+    ready: { get: () => ready, configurable: true },
+    unwatched: { get: () => natives.unwatched(), configurable: true },
     snapshot: { value: snapshot, writable: true, configurable: true },
     add: { value: add, writable: true, configurable: true },
     unwatch: { value: unwatch, writable: true, configurable: true },

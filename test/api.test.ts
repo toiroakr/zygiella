@@ -52,6 +52,13 @@ test("FSWatcher is only a type: it is not exported as a value to construct or te
   expect("FSWatcher" in zygiella).toBe(false);
 });
 
+test("ready and unwatched can be overridden on the watcher, as the getters of a class could", () => {
+  watcher = watch(dir);
+  Object.defineProperty(watcher, "ready", { get: () => Promise.resolve({ missing: ["x"] }) });
+  Object.defineProperty(watcher, "unwatched", { value: ["y"] });
+  expect(watcher.unwatched).toEqual(["y"]);
+});
+
 test("ready and unwatched are not enumerable, so spreading or serializing a watcher does not read them", () => {
   watcher = watch(dir);
   expect(Object.keys(watcher)).not.toContain("ready");
