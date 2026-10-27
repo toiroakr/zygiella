@@ -23,6 +23,7 @@ const native = vi.hoisted(() => ({
   watched: "",
   holdPath: "",
   holdFrom: "",
+  holdEarly: false,
   failPath: "",
   refreshGate: Promise.resolve(),
   releaseRefresh: () => {},
@@ -42,6 +43,7 @@ const native = vi.hoisted(() => ({
     native.holdKind = kind;
     native.holdPath = path;
     native.holdFrom = from;
+    native.holdEarly = false;
     native.rejectHeld = rejecting;
     native.held = false;
     native.gate = new Promise<void>((resolve) => {
@@ -53,6 +55,11 @@ const native = vi.hoisted(() => ({
     native.refreshGate = new Promise<void>((resolve) => {
       native.releaseRefresh = resolve;
     });
+  },
+  // the read of `path` waits before it is made, so a file that is gone can be held too, as its read would fail at once
+  holdBefore(path: string) {
+    native.hold("stat", false, path);
+    native.holdEarly = true;
   },
   failNext(path: string) {
     native.failPath = path;
@@ -93,6 +100,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       const stack = new Error().stack ?? "";
       const refresh = isRefresh(path, stack);
       if (refresh) await native.refreshGate;
+      if (native.holdEarly && !refresh) await native.pause("stat", path, stack);
       if (path === native.failPath && !refresh) {
         native.failPath = "";
         throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
@@ -147,6 +155,7 @@ beforeEach(async () => {
   native.watched = "";
   native.holdPath = "";
   native.holdFrom = "";
+  native.holdEarly = false;
   native.failPath = "";
   native.holdNext = false;
   native.rejectHeld = false;
@@ -323,6 +332,25 @@ describe("a read of the file that completes after the change was reported", () =
       ["unlink", x],
       ["addDir", x],
     ]);
+  });
+
+  test("reports each missing file as removed without waiting for the check of another one", async () => {
+    const a = join(dir, "a.txt");
+    const b = join(dir, "b.txt");
+    const c = join(dir, "c.txt");
+    for (const file of [a, b, c]) await writeFile(file, "1");
+    const { seen } = await watching(dir, a);
+
+    await Promise.all([rm(a), rm(b), rm(c)]);
+    native.holdBefore(b);
+    native.deliver();
+    await until(() => native.held);
+    await until(() => seen.length >= 2);
+
+    expect(seen.map(([, path]) => path).sort()).toEqual([a, c]);
+    native.open();
+    await until(() => seen.length >= 3);
+    expect(seen.map(([event]) => event)).toEqual(["unlink", "unlink", "unlink"]);
   });
 
   test.skipIf(process.platform === "win32")(
