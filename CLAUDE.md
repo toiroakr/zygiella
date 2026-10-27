@@ -43,9 +43,17 @@ only a type). The parts that own their own state or have none are in their own f
 state), `snapshot.ts` (validating and seeding a snapshot, no state), `options.ts` (the defaults and validation of the options, no state), `native.ts` (the `fs.watch` handles and the unwatched
 set), `pending.ts` (add / change waiting to settle and unlinks held for `atomic`) and `types.ts`. The tests in `test/` run against the real file system.
 
-- Each directory that is descended into has its own `fs.watch`. Native events are not trusted for their type or
-  file name: every event re-reads the directory and diffs it against a snapshot (`entries`), and the diff
-  produces the reports. This absorbs coalesced and duplicated events on every platform.
+- Each directory that is descended into has its own `fs.watch`, except on macOS, where `natives.ensureTree` watches a
+  root and everything below it with one `recursive: true` watch (not with a finite `depth`). `covers` says whether a
+  tree watch reports a directory, and `physical` in `index.ts` whether it can: a directory behind a followed link is
+  not under the tree physically, so it keeps its own watch. A tree watch that is not available or fails to open
+  falls back to one watch per directory. Native events are not trusted for their type: every event re-reads the
+  directory and diffs it against a snapshot (`entries`), and the diff produces the reports. This absorbs coalesced
+  and duplicated events on every platform. Only in a directory with more than `LARGE_DIRECTORY` entries is the name
+  of the event trusted (`syncName`), because the full read costs 0.2 to 1 s there.
+- A native watcher error is retried by one re-sync of its directory, except `EMFILE` / `ENOSPC` and the fourth error
+  in a row without an event (`native.ts`); a re-watch after `EMFILE` on macOS made libuv rebuild its one stream for
+  every handle, and the process never reached `ready`.
 - `Mode` decides whether a diff reports: `quiet` (remember only, for `ignoreInitial`), `initial` (report at
   once, it is what `ready` waits for) and `live` (report after a quiet period, see below).
 - `add` and `change` reports wait for 50 ms of quiet per file, because Linux splits a write into truncate and

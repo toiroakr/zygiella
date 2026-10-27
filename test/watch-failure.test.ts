@@ -12,19 +12,27 @@ const native = vi.hoisted(() => ({
   fail: new Set<string>(),
   code: "ENOSPC",
   made: new Map<string, { emit: (event: string, error: Error) => boolean }>(),
+  calls: new Map<string, number>(),
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
     ...actual,
-    watch: ((path: string, ...rest: unknown[]) => {
+    watch: ((path: string, options?: { recursive?: boolean }, ...rest: unknown[]) => {
+      // these tests are about directories that fail one by one, so a tree is never watched with a single call
+      if (options?.recursive)
+        throw Object.assign(new Error("recursive watching is not supported"), {
+          code: "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM",
+        });
+      native.calls.set(String(path), (native.calls.get(String(path)) ?? 0) + 1);
       if (native.fail.has(String(path)))
         throw Object.assign(new Error(`${native.code}: cannot watch '${path}'`), {
           code: native.code,
         });
       const watcher = (actual.watch as unknown as (...args: unknown[]) => FSWatcherLike)(
         path,
+        options,
         ...rest,
       );
       native.made.set(String(path), watcher);
@@ -47,6 +55,7 @@ beforeEach(async () => {
   watchers = [];
   native.fail.clear();
   native.made.clear();
+  native.calls.clear();
   native.code = "ENOSPC";
 });
 
@@ -176,6 +185,36 @@ describe("a watch that could not be established", () => {
     await writeFile(join(dir, "sub", "a.txt"), "1");
     await until(() => seen.length > 0);
     expect(seen).toEqual([["add", join(dir, "sub", "a.txt")]]);
+  });
+
+  test("a native watcher error that says a limit was hit lists the directory without watching it again", async () => {
+    await mkdir(join(dir, "sub"));
+    const { w, errors } = await start(dir);
+    native.made
+      .get(join(dir, "sub"))!
+      .emit("error", Object.assign(new Error("limit"), { code: "EMFILE" }));
+    await until(() => errors.length > 0);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(native.calls.get(join(dir, "sub"))).toBe(1);
+    expect(w.unwatched).toEqual([join(dir, "sub")]);
+    await w.rescan();
+    expect(native.calls.get(join(dir, "sub"))).toBe(2);
+    expect(w.unwatched).toEqual([]);
+  });
+
+  test("a native watcher error that keeps coming without an event in between stops being retried", async () => {
+    await mkdir(join(dir, "sub"));
+    const { w, errors } = await start(dir);
+    const sub = join(dir, "sub");
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      const before = native.calls.get(sub) ?? 0;
+      native.made.get(sub)!.emit("error", Object.assign(new Error("lost"), { code: "EIO" }));
+      await until(() => errors.length === attempt);
+      if (attempt <= 3) await until(() => (native.calls.get(sub) ?? 0) === before + 1);
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    expect(native.calls.get(sub)).toBe(4);
+    expect(w.unwatched).toEqual([sub]);
   });
 
   test("the parent of a watched file is no longer listed once the file's directory is removed", async () => {
