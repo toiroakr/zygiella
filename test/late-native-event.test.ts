@@ -1,4 +1,12 @@
-import { mkdtemp, realpath, rm as removeOnce, truncate, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  realpath,
+  rename,
+  rm as removeOnce,
+  symlink,
+  truncate,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -8,8 +16,10 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 const native = vi.hoisted(() => ({
   listeners: [] as Array<() => void>,
   sizesRead: [] as number[],
+  linksRead: [] as string[],
   watched: "",
   holdNext: false,
+  rejectHeld: false,
   held: false,
   gate: Promise.resolve(),
   open: () => {},
@@ -17,12 +27,22 @@ const native = vi.hoisted(() => ({
     for (const listener of native.listeners) listener();
   },
   // the next read of the watched file has its result kept back, as when the completion of one `stat` is delivered late
-  hold() {
+  holdKind: "stat" as "stat" | "readlink",
+  hold(kind: "stat" | "readlink" = "stat", rejecting = false) {
     native.holdNext = true;
+    native.holdKind = kind;
+    native.rejectHeld = rejecting;
     native.held = false;
     native.gate = new Promise<void>((resolve) => {
       native.open = resolve;
     });
+  },
+  async pause(kind: "stat" | "readlink") {
+    if (!native.holdNext || native.holdKind !== kind) return;
+    native.holdNext = false;
+    native.held = true;
+    await native.gate;
+    if (native.rejectHeld) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
   },
 }));
 
@@ -50,15 +70,27 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       const info = await (read as (...args: unknown[]) => Promise<{ size: number }>)(path, ...rest);
       if (path === native.watched) {
         native.sizesRead.push(info.size);
-        if (native.holdNext) {
-          native.holdNext = false;
-          native.held = true;
-          await native.gate;
-        }
+        await native.pause("stat");
       }
       return info;
     }) as typeof actual.stat;
-  return { ...actual, stat: recording(actual.stat), lstat: recording(actual.lstat) };
+  const pausing = (async (path: string, ...rest: unknown[]) => {
+    const target = await (actual.readlink as (...args: unknown[]) => Promise<string>)(
+      path,
+      ...rest,
+    );
+    if (path === native.watched) {
+      native.linksRead.push(target);
+      await native.pause("readlink");
+    }
+    return target;
+  }) as typeof actual.readlink;
+  return {
+    ...actual,
+    stat: recording(actual.stat),
+    lstat: recording(actual.lstat),
+    readlink: pausing,
+  };
 });
 
 const { watch } = await import("../src/index.ts");
@@ -75,8 +107,10 @@ beforeEach(async () => {
   watchers = [];
   native.listeners = [];
   native.sizesRead = [];
+  native.linksRead = [];
   native.watched = "";
   native.holdNext = false;
+  native.rejectHeld = false;
   native.held = false;
   native.open = () => {};
 });
@@ -95,9 +129,9 @@ async function until(predicate: () => boolean, ms = 3000): Promise<void> {
   }
 }
 
-async function watching(target: string, file: string) {
+async function watching(target: string, file: string, options: { followSymlinks?: boolean } = {}) {
   native.watched = file;
-  const w = watch(target, { ignoreInitial: true });
+  const w = watch(target, { ignoreInitial: true, ...options });
   watchers.push(w);
   const seen: Array<[string, string]> = [];
   w.on("all", (event, path) => seen.push([event, path]));
@@ -166,5 +200,54 @@ describe("a read of the file that completes after the change was reported", () =
 
     expect(seen).toEqual([["change", file]]);
     expect(w.snapshot().entries.find((entry) => entry.path === file)?.size).toBe(2);
+  });
+
+  test("does not report the file as removed when the read that failed because it was missing completes after the change was reported", async () => {
+    const file = join(dir, "a.txt");
+    await writeFile(file, "1");
+    const { w, seen } = await watching(dir, file);
+
+    await truncate(file, 0);
+    native.deliver();
+    await until(() => native.sizesRead.includes(0));
+    native.hold("stat", true);
+    native.deliver();
+    await until(() => native.held);
+    await writeFile(file, "22");
+    await until(() => seen.length > 0);
+    const reads = native.sizesRead.length;
+    native.open();
+    await until(() => native.sizesRead.length > reads || seen.length > 1);
+
+    expect(seen).toEqual([["change", file]]);
+    expect(w.snapshot().entries.find((entry) => entry.path === file)?.size).toBe(2);
+  });
+
+  test("does not report the link target again when the read of it completes after the change was reported", async () => {
+    const link = join(dir, "link");
+    const replaceLink = async (target: string) => {
+      await symlink(target, `${link}.tmp`);
+      await rename(`${link}.tmp`, link);
+    };
+    await symlink(join(dir, "first"), link);
+    const { w, seen } = await watching(link, link, { followSymlinks: false });
+
+    const linksBefore = native.linksRead.length;
+    await replaceLink(join(dir, "second"));
+    native.deliver();
+    await until(() => native.linksRead.length > linksBefore);
+    native.hold("readlink");
+    native.deliver();
+    await until(() => native.held);
+    await replaceLink(join(dir, "third"));
+    await until(() => seen.length > 0);
+    const reads = native.linksRead.length;
+    native.open();
+    await until(() => native.linksRead.length > reads || seen.length > 1);
+
+    expect(seen).toEqual([["change", link]]);
+    expect(w.snapshot().entries.find((entry) => entry.path === link)?.link).toBe(
+      join(dir, "third"),
+    );
   });
 });
