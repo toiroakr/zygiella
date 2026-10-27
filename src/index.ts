@@ -224,7 +224,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     for (const root of watchedRoots) if (kinds.get(root) === "file") again.add(dirname(root));
     for (const [dir, ancestry] of ancestries)
       if (within(path, dir) && depthLeft.has(dir) && !physical(dir, ancestry)) again.add(dir);
-    for (const dir of again) if (!natives.unwatched().includes(dir)) natives.ensure(dir);
+    const failed = new Set(natives.unwatched());
+    for (const dir of again) if (!failed.has(dir)) natives.ensure(dir);
   }
 
   /**
