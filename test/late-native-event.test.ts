@@ -1,4 +1,5 @@
 import {
+  mkdir,
   mkdtemp,
   realpath,
   rename,
@@ -17,7 +18,12 @@ const native = vi.hoisted(() => ({
   listeners: [] as Array<() => void>,
   sizesRead: [] as number[],
   linksRead: [] as string[],
+  reads: [] as string[],
+  root: "",
   watched: "",
+  holdPath: "",
+  holdFrom: "",
+  failPath: "",
   refreshGate: Promise.resolve(),
   releaseRefresh: () => {},
   holdNext: false,
@@ -30,9 +36,12 @@ const native = vi.hoisted(() => ({
   },
   // the next read of the watched file has its result kept back, as when the completion of one `stat` is delivered late
   holdKind: "stat" as "stat" | "readlink",
-  hold(kind: "stat" | "readlink" = "stat", rejecting = false) {
+  // `path` is the file whose read is kept back (the watched one by default), `from` a name in the stack of the call that made it
+  hold(kind: "stat" | "readlink" = "stat", rejecting = false, path = "", from = "") {
     native.holdNext = true;
     native.holdKind = kind;
+    native.holdPath = path;
+    native.holdFrom = from;
     native.rejectHeld = rejecting;
     native.held = false;
     native.gate = new Promise<void>((resolve) => {
@@ -45,8 +54,12 @@ const native = vi.hoisted(() => ({
       native.releaseRefresh = resolve;
     });
   },
-  async pause(kind: "stat" | "readlink") {
+  failNext(path: string) {
+    native.failPath = path;
+  },
+  async pause(kind: "stat" | "readlink", path: string, stack: string) {
     if (!native.holdNext || native.holdKind !== kind) return;
+    if (path !== (native.holdPath || native.watched) || !stack.includes(native.holdFrom)) return;
     native.holdNext = false;
     native.held = true;
     await native.gate;
@@ -73,21 +86,28 @@ vi.mock("node:fs", async (importOriginal) => {
 // the sizes the scans read for the watched file, so the test can wait for the read that saw the truncated file
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  const isRefresh = (path: string) =>
-    path === native.watched && (new Error().stack ?? "").includes("pending.ts");
+  const isRefresh = (path: string, stack: string) =>
+    path === native.watched && stack.includes("pending.ts");
   const recording = (read: typeof actual.stat): typeof actual.stat =>
     (async (path: string, ...rest: unknown[]) => {
-      const refresh = isRefresh(path);
+      const stack = new Error().stack ?? "";
+      const refresh = isRefresh(path, stack);
       if (refresh) await native.refreshGate;
+      if (path === native.failPath && !refresh) {
+        native.failPath = "";
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }
       const info = await (read as (...args: unknown[]) => Promise<{ size: number }>)(path, ...rest);
-      if (path === native.watched && !refresh) {
-        native.sizesRead.push(info.size);
-        await native.pause("stat");
+      if (!refresh && path.startsWith(native.root)) {
+        native.reads.push(path);
+        if (path === native.watched) native.sizesRead.push(info.size);
+        await native.pause("stat", path, stack);
       }
       return info;
     }) as typeof actual.stat;
   const pausing = (async (path: string, ...rest: unknown[]) => {
-    const refresh = isRefresh(path);
+    const stack = new Error().stack ?? "";
+    const refresh = isRefresh(path, stack);
     if (refresh) await native.refreshGate;
     const target = await (actual.readlink as (...args: unknown[]) => Promise<string>)(
       path,
@@ -95,7 +115,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     );
     if (path === native.watched && !refresh) {
       native.linksRead.push(target);
-      await native.pause("readlink");
+      await native.pause("readlink", path, stack);
     }
     return target;
   }) as typeof actual.readlink;
@@ -122,7 +142,12 @@ beforeEach(async () => {
   native.listeners = [];
   native.sizesRead = [];
   native.linksRead = [];
+  native.reads = [];
+  native.root = dir;
   native.watched = "";
+  native.holdPath = "";
+  native.holdFrom = "";
+  native.failPath = "";
   native.holdNext = false;
   native.rejectHeld = false;
   native.held = false;
@@ -146,7 +171,11 @@ async function until(predicate: () => boolean, ms = 3000): Promise<void> {
   }
 }
 
-async function watching(target: string, file: string, options: { followSymlinks?: boolean } = {}) {
+async function watching(
+  target: string | string[],
+  file: string,
+  options: { followSymlinks?: boolean } = {},
+) {
   native.watched = file;
   const w = watch(target, { ignoreInitial: true, ...options });
   watchers.push(w);
@@ -246,6 +275,54 @@ describe("a read of the file that completes after the change was reported", () =
 
     expect(seen).toEqual([["change", file]]);
     expect(w.snapshot().entries.find((entry) => entry.path === file)?.size).toBe(2);
+  });
+
+  test("does not report a file as removed when it was missing at its read and was back before the siblings were read", async () => {
+    const a = join(dir, "a.txt");
+    const b = join(dir, "b.txt");
+    await writeFile(a, "1");
+    await writeFile(b, "1");
+    const { seen } = await watching(dir, a);
+    const readsBefore = native.reads.length;
+
+    native.holdRefresh();
+    await truncate(a, 0);
+    native.deliver();
+    await until(() => native.sizesRead.includes(0) && native.reads.includes(b, readsBefore));
+    native.hold("stat", false, b);
+    native.failNext(a);
+    native.deliver();
+    await until(() => native.held);
+    await writeFile(a, "22");
+    native.releaseRefresh();
+    await until(() => seen.length > 0);
+    const reads = native.sizesRead.length;
+    native.open();
+    await until(() => native.sizesRead.length > reads || seen.length > 1);
+
+    expect(seen).toEqual([["change", a]]);
+  });
+
+  test("does not put a file back in the place of the directory that replaced it when the read of the file returns late", async () => {
+    const x = join(dir, "x");
+    await writeFile(x, "1");
+    const { seen } = await watching([dir, x], x);
+
+    native.hold("stat", false, x, "statRoot");
+    native.deliver();
+    await until(() => native.held);
+    await rm(x);
+    await mkdir(x);
+    native.deliver();
+    await until(() => seen.length > 1);
+    const reads = native.reads.length;
+    native.open();
+    await until(() => native.reads.length > reads || seen.length > 2);
+
+    expect(seen).toEqual([
+      ["unlink", x],
+      ["addDir", x],
+    ]);
   });
 
   test.skipIf(process.platform === "win32")(
