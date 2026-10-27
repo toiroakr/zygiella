@@ -298,15 +298,21 @@ export class FSWatcher extends EventEmitter<Events> {
   /** Remembers what `since` holds for the watched roots, so the first scan reports only the difference. */
   #seed(since: Snapshot | null | undefined, roots: string[]): void {
     if (!since || since.version !== SNAPSHOT_VERSION || !Array.isArray(since.entries)) return;
+    const rootSet = new Set(roots);
+    // the nearest watched root at or above a path, found by walking up, not by looking at every root
+    const rootOf = (path: string): string | undefined => {
+      for (let p = path; ; p = dirname(p)) {
+        if (rootSet.has(p)) return p;
+        if (dirname(p) === p) return undefined;
+      }
+    };
     const kept = new Set<string>();
     // shallow first, so that whether the parent was kept is known
     const usable = since.entries
       .filter(isSnapshotEntry)
       .sort((x, y) => x.path.length - y.path.length);
     for (const entry of usable) {
-      const root = roots
-        .filter((r) => within(r, entry.path))
-        .sort((a, b) => b.length - a.length)[0];
+      const root = rootOf(entry.path);
       if (root === undefined) continue;
       // below the levels that are descended into now, so it is not scanned and would be reported as unlink
       if (entry.path.slice(root.length).split(sep).filter(Boolean).length > this.#depth + 1)
@@ -315,11 +321,11 @@ export class FSWatcher extends EventEmitter<Events> {
       let skipped = false;
       for (let path = entry.path; !skipped; path = dirname(path)) {
         skipped = this.#ignored.byPath(path);
-        if (roots.includes(path) || dirname(path) === path) break;
+        if (rootSet.has(path) || dirname(path) === path) break;
       }
       if (skipped) continue;
       // below an entry that is missing, it can never be reached from its parent, and would stay in the baseline
-      if (!roots.includes(entry.path) && !kept.has(dirname(entry.path))) continue;
+      if (!rootSet.has(entry.path) && !kept.has(dirname(entry.path))) continue;
       if (entry.dir) kept.add(entry.path);
       const { dir, mtimeMs, size, ino, link } = entry;
       this.#setEntry(entry.path, { dir, mtimeMs, size, ino, link });
