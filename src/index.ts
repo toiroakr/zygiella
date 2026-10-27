@@ -48,6 +48,13 @@ export interface WatchOptions {
    * `null` on the first run.
    */
   since?: Snapshot | null;
+  /**
+   * Call `rescan()` this many ms after the previous one finished, from `ready` until `close()`, for file systems
+   * where `fs.watch` reports nothing (NFS, Docker bind mounts, `/mnt/c` in WSL2). The wait starts when a read is
+   * done, so a slow tree is not read back to back. With `persistent: false` the timer is unref'd. 0 or unset: no
+   * timer, and `rescan()` is yours to call. Default: 0.
+   */
+  rescanInterval?: number;
   /** Skip EACCES and EPERM silently instead of emitting `error`. Default: false. */
   ignorePermissionErrors?: boolean;
   /** Hold add / change back until the file's size and mtime have been stable for `stabilityThreshold` ms. */
@@ -107,6 +114,8 @@ const SNAPSHOT_VERSION = 1;
 const QUIET_MS = 50;
 const READY_SETTLE_MS = 50;
 const ATOMIC_MS = 100;
+// setTimeout treats a delay above 2 ** 31 - 1 as 1 ms
+const MAX_TIMER_MS = 2 ** 31 - 1;
 const EDITOR_TEMP = /\..*\.(sw[px])$|~$|\.subl.*\.tmp/;
 
 /**
@@ -182,6 +191,7 @@ export class FSWatcher extends EventEmitter<Events> {
   readonly #followSymlinks: boolean;
   readonly #ignorePermissionErrors: boolean;
   readonly #persistent: boolean;
+  readonly #rescanInterval: number;
   readonly #settle: { stabilityThreshold: number; pollInterval: number } | undefined;
 
   readonly #roots = new Set<string>();
@@ -200,6 +210,7 @@ export class FSWatcher extends EventEmitter<Events> {
   readonly #denied = new Set<string>();
   readonly #unwatched = new Set<string>();
   readonly #missingAtStart = new Set<string>();
+  #rescanTimer: NodeJS.Timeout | undefined;
   #closed = false;
 
   #ready: Promise<ReadyResult>;
@@ -236,6 +247,16 @@ export class FSWatcher extends EventEmitter<Events> {
     this.#followSymlinks = options.followSymlinks ?? true;
     this.#ignorePermissionErrors = options.ignorePermissionErrors ?? false;
     this.#persistent = options.persistent ?? true;
+    const rescanInterval = options.rescanInterval ?? 0;
+    // `false` and `""` would pass the range test by coercion, and setTimeout reads them as 1 ms
+    if (
+      typeof rescanInterval !== "number" ||
+      !(rescanInterval >= 0 && rescanInterval <= MAX_TIMER_MS)
+    )
+      throw new RangeError(
+        `rescanInterval must be a number from 0 to ${MAX_TIMER_MS} ms, got ${String(rescanInterval)}`,
+      );
+    this.#rescanInterval = rescanInterval;
     const awf = options.awaitWriteFinish;
     this.#settle = awf
       ? {
@@ -247,6 +268,7 @@ export class FSWatcher extends EventEmitter<Events> {
     this.#seed(options.since, roots);
     this.#ready = this.#watch(roots, options.since !== undefined).then((result) => {
       if (!this.#closed) this.emit("ready", result);
+      this.#scheduleRescan();
       return result;
     });
   }
@@ -367,6 +389,7 @@ export class FSWatcher extends EventEmitter<Events> {
 
   async close(): Promise<void> {
     this.#closed = true;
+    clearTimeout(this.#rescanTimer);
     // what was never reported is not what the snapshot should say the watcher saw
     for (const [path, job] of this.#settling) {
       clearTimeout(job.timer);
@@ -383,6 +406,13 @@ export class FSWatcher extends EventEmitter<Events> {
     this.#native.clear();
     this.#unwatched.clear();
     await Promise.all([...this.#queues.values()].map((q) => q.done));
+  }
+
+  #scheduleRescan(): void {
+    if (this.#closed || this.#rescanInterval === 0) return;
+    this.#rescanTimer = this.#timeout(() => {
+      void this.rescan().finally(() => this.#scheduleRescan());
+    }, this.#rescanInterval);
   }
 
   #timeout(fn: () => void, ms: number): NodeJS.Timeout {
