@@ -98,9 +98,11 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   const queues = new Map<string, { dirty: boolean; done: Promise<void> }>();
   const denied = new Set<string>();
   const missingAtStart = new Set<string>();
-  const settles = new Map<string, number>();
-  // one count for all paths: a count per path that `remove` resets could reach again the value a read still in flight took
-  let settleCount = 0;
+  /**
+   * The reads of each path that have not returned yet. Marking them as stale beats comparing a count taken before and
+   * after: a count has to be dropped with the path and then reads again the value that a read still in flight took.
+   */
+  const reads = new Map<string, Set<{ stale: boolean }>>();
   let rescanTimer: NodeJS.Timeout | undefined;
   let closed = false;
   let ready: Promise<ReadyResult>;
@@ -135,7 +137,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   function settled(path: string, info: Stats, link: string | undefined): void {
     const entry = entries.get(path);
     if (entry && !entry.dir) {
-      settles.set(path, ++settleCount);
+      staleReads(path);
       entries.set(path, {
         ...entry,
         mtimeMs: info.mtimeMs,
@@ -146,21 +148,30 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     }
   }
 
+  function staleReads(path: string): void {
+    for (const read of reads.get(path) ?? []) read.stale = true;
+  }
+
   /**
-   * Reads again when `settled` recorded the path meanwhile: the result may be older than the entry and would put it back.
-   * Dropping it instead could lose a newer state whose native event was merged into the one that started this read.
+   * Reads again when `settled` recorded the path, or `remove` forgot it, while the read was in flight: the result
+   * may be older than the entry and would put it back. Dropping it instead could lose a newer state whose native
+   * event was merged into the one that started this read.
    */
   async function unsettled<T>(path: string, read: () => Promise<T>): Promise<T> {
     for (;;) {
-      const before = settles.get(path);
-      let result: T;
+      const mark = { stale: false };
+      let marks = reads.get(path);
+      if (!marks) reads.set(path, (marks = new Set()));
+      marks.add(mark);
       try {
-        result = await read();
+        const result = await read();
+        if (!mark.stale) return result;
       } catch (error) {
-        if (settles.get(path) === before) throw error;
-        continue;
+        if (!mark.stale) throw error;
+      } finally {
+        marks.delete(mark);
+        if (!marks.size && reads.get(path) === marks) reads.delete(path);
       }
-      if (settles.get(path) === before) return result;
     }
   }
 
@@ -443,26 +454,28 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       if (!VANISHED.has(error.code ?? "")) uninspectable.add(path);
       return undefined;
     };
-    await Promise.all(
-      names.map(async (name) => {
-        const path = join(dir, name);
-        const found = await inspect(path, left, mode, ancestry, failed);
-        if (!found) return;
-        seen.add(path);
-        await visit(
-          path,
-          found.info,
-          found.descend,
-          mode,
-          [...ancestry, found.real],
-          found.info.isDirectory() ? found.real : found.link,
-        );
-      }),
-    );
+    const examine = async (path: string): Promise<boolean> => {
+      const found = await inspect(path, left, mode, ancestry, failed);
+      if (!found) return false;
+      seen.add(path);
+      await visit(
+        path,
+        found.info,
+        found.descend,
+        mode,
+        [...ancestry, found.real],
+        found.info.isDirectory() ? found.real : found.link,
+      );
+      return true;
+    };
+    await Promise.all(names.map((name) => examine(join(dir, name))));
     if (closed) return;
-    for (const path of children.get(dir) ?? []) {
-      if (!seen.has(path) && !uninspectable.has(path) && !watchedRoots.has(path))
-        remove(path, true, undefined, mode !== "seed");
+    for (const path of Array.from(children.get(dir) ?? [])) {
+      if (seen.has(path) || uninspectable.has(path) || watchedRoots.has(path)) continue;
+      // the siblings may have taken long: a file that was missing at its read can be back and reported since then
+      if (await examine(path)) continue;
+      if (closed) return;
+      if (!uninspectable.has(path)) remove(path, true, undefined, mode !== "seed");
     }
     const listed = new Set(names);
     for (const path of denied) {
@@ -613,7 +626,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       const entry = entries.get(key)!;
       const job = pending.cancel(key);
       entries.delete(key);
-      settles.delete(key);
+      staleReads(key);
       denied.delete(key);
       children.get(dirname(key))?.delete(key);
       children.delete(key);
