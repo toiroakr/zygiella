@@ -98,6 +98,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   const queues = new Map<string, { dirty: boolean; done: Promise<void> }>();
   const denied = new Set<string>();
   const missingAtStart = new Set<string>();
+  const settles = new Map<string, number>();
   let rescanTimer: NodeJS.Timeout | undefined;
   let closed = false;
   let ready: Promise<ReadyResult>;
@@ -131,7 +132,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   /** The file settled at this size and mtime: the entry may not know yet, as no native event reads it again. */
   function settled(path: string, info: Stats, link: string | undefined): void {
     const entry = entries.get(path);
-    if (entry && !entry.dir)
+    if (entry && !entry.dir) {
+      settles.set(path, (settles.get(path) ?? 0) + 1);
       entries.set(path, {
         ...entry,
         mtimeMs: info.mtimeMs,
@@ -139,6 +141,19 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
         ino: info.ino,
         link: info.isSymbolicLink() ? (link ?? entry.link) : undefined,
       });
+    }
+  }
+
+  /**
+   * Reads again when `settled` recorded the path meanwhile: the result may be older than the entry and would put it back.
+   * Dropping it instead could lose a newer state whose native event was merged into the one that started this read.
+   */
+  async function unsettled<T>(path: string, read: () => Promise<T>): Promise<T> {
+    for (;;) {
+      const before = settles.get(path);
+      const result = await read();
+      if (settles.get(path) === before) return result;
+    }
   }
 
   /** Remembers what `since` holds for the watched roots, so the first scan reports only the difference. */
@@ -330,12 +345,14 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     mode: Mode,
   ): Promise<{ info: Stats | undefined; link: string | undefined; unreadable: boolean }> {
     let unreadable = false;
-    let info = await followStat(root).catch((error: NodeJS.ErrnoException) => {
-      fail(error, root);
-      unreadable = !VANISHED.has(error.code ?? "");
-      if (mode !== "live" && VANISHED.has(error.code ?? "")) missingAtStart.add(root);
-      return undefined;
-    });
+    let info = await unsettled(root, () => followStat(root)).catch(
+      (error: NodeJS.ErrnoException) => {
+        fail(error, root);
+        unreadable = !VANISHED.has(error.code ?? "");
+        if (mode !== "live" && VANISHED.has(error.code ?? "")) missingAtStart.add(root);
+        return undefined;
+      },
+    );
     let link: string | undefined;
     if (!followSymlinks && info?.isSymbolicLink()) {
       link = await readlink(root).catch(() => undefined);
@@ -464,7 +481,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     failed: Failed,
   ): Promise<Found | undefined> {
     if (ignored.byPath(path)) return;
-    const own = await lstat(path).catch((error) => failed(error, path));
+    const own = await unsettled(path, () => lstat(path)).catch((error) => failed(error, path));
     if (!own) return;
     let found: Found | undefined = {
       info: own,
@@ -490,7 +507,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     ancestry: readonly string[],
     failed: Failed,
   ): Promise<Found | undefined> {
-    const info = await stat(path).catch((error) => failed(error, path));
+    const info = await unsettled(path, () => stat(path)).catch((error) => failed(error, path));
     if (!info) return;
     if (!info.isDirectory()) return { ...found, info };
     const real = await realpath(path).catch((error) => failed(error, path));
@@ -587,6 +604,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       const entry = entries.get(key)!;
       const job = pending.cancel(key);
       entries.delete(key);
+      settles.delete(key);
       denied.delete(key);
       children.get(dirname(key))?.delete(key);
       children.delete(key);
