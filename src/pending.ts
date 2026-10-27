@@ -79,8 +79,16 @@ export function pendingEvents({
       settling.set(path, job);
       if (!settle) {
         // Linux reports a write as truncate then write, and a new file as create then write: one report for the burst
-        job.timer = timeout(() => {
+        job.timer = timeout(async () => {
+          const info = await stat(path).catch(() => undefined);
+          const link =
+            !followSymlinks && info?.isSymbolicLink()
+              ? await readlink(path).catch(() => undefined)
+              : undefined;
+          if (settling.get(path) !== job) return;
           settling.delete(path);
+          // a native event for the write that finished meanwhile may arrive later and must not report it again
+          if (info) settled(path, info, link);
           dispatch(job.event, path);
         }, QUIET_MS);
         return;
