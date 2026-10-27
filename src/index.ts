@@ -3,7 +3,7 @@ import type { Stats } from "node:fs";
 import { lstat, readdir, readlink, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 import { pendingEvents } from "./pending.ts";
-import { DENIED, VANISHED, nativeWatches } from "./native.ts";
+import { DENIED, VANISHED, nativeWatches, nearestDirectory } from "./native.ts";
 import { recorded, seedEntries, toSnapshot } from "./snapshot.ts";
 import { list, within } from "./match.ts";
 import { resolveOptions } from "./options.ts";
@@ -27,6 +27,8 @@ export type {
 } from "./types.ts";
 
 const READY_SETTLE_MS = 50;
+const isTrue = (): boolean => true;
+const isFalse = (): boolean => false;
 
 /**
  * quiet: remember only. initial: report at once (it is what `ready` waits for). seed: initial against a snapshot, so
@@ -269,6 +271,47 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     const previousProbe = probes.get(root);
     const previousParent = kinds.get(root) === "file" ? dirname(root) : undefined;
     if (mode !== "live") missingAtStart.delete(root);
+    const { info, link, unreadable } = await statRoot(root, mode);
+    if (closed || !watchedRoots.has(root)) return;
+    if (info && !info.isDirectory()) denied.delete(root);
+
+    if (!info) {
+      await watchMissing(root, mode, unreadable, previousProbe);
+      if (previousParent) natives.release(previousParent);
+      // the root may have been created between the stat above and the watch being attached
+      if (await followStat(root).then(isTrue, isFalse)) await syncRoot(root, "live");
+      return;
+    }
+
+    if (!entries.has(root) && ignored.byStats?.(root, info)) {
+      // watched all the same, so that the path is read again when its stats may have changed
+      kinds.set(root, info.isDirectory() ? "dir" : "file");
+      // a directory has no entry to keep its watch while it is skipped, so the probe does, and unwatch() releases it
+      if (info.isDirectory()) probes.set(root, root);
+      else probes.delete(root);
+      natives.ensure(info.isDirectory() ? root : dirname(root));
+    } else {
+      probes.delete(root);
+      if (info.isDirectory()) {
+        kinds.set(root, "dir");
+        natives.ensure(root);
+        const real = await realpath(root).catch(() => root);
+        await visit(root, info, 0, mode, [], real);
+        await syncDir(root, maxDepth, mode, [real]);
+      } else {
+        kinds.set(root, "file");
+        natives.ensure(dirname(root));
+        await visit(root, info, 0, mode, [], link);
+      }
+    }
+    if (previousProbe) natives.release(previousProbe);
+    if (previousParent) natives.release(previousParent);
+  }
+
+  async function statRoot(
+    root: string,
+    mode: Mode,
+  ): Promise<{ info: Stats | undefined; link: string | undefined; unreadable: boolean }> {
     let unreadable = false;
     let info = await followStat(root).catch((error: NodeJS.ErrnoException) => {
       fail(error, root);
@@ -281,73 +324,33 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       link = await readlink(root).catch(() => undefined);
       if (link === undefined) info = undefined;
     }
-    if (closed || !watchedRoots.has(root)) return;
-    if (info && !info.isDirectory()) denied.delete(root);
+    return { info, link, unreadable };
+  }
 
-    if (!info) {
-      // a root that cannot be inspected is not known to be gone, and neither is what is below it
-      if (!unreadable) remove(root, true, undefined, mode !== "seed");
-      kinds.set(root, "missing");
-      const nearest = async (): Promise<string> => {
-        let ancestor = dirname(root);
-        while (
-          !(await stat(ancestor).catch(() => undefined))?.isDirectory() &&
-          dirname(ancestor) !== ancestor
-        )
-          ancestor = dirname(ancestor);
-        return ancestor;
-      };
-      // a deeper folder may be created while the watcher is being attached, and would then never be seen
-      let ancestor = await nearest();
-      const attached = new Set<string>();
-      for (;;) {
-        probes.set(root, ancestor);
-        natives.ensure(ancestor);
-        attached.add(ancestor);
-        const again = await nearest();
-        if (again === ancestor) break;
-        ancestor = again;
-      }
-      if (previousProbe) attached.add(previousProbe);
-      attached.delete(ancestor);
-      for (const stale of attached) natives.release(stale);
-      if (previousParent) natives.release(previousParent);
-      // the root may have been created between the stat above and the watch being attached
-      if (
-        await followStat(root).then(
-          () => true,
-          () => false,
-        )
-      )
-        await syncRoot(root, "live");
-      return;
+  /** Watches the nearest directory that exists, so that the root is seen when it is created. */
+  async function watchMissing(
+    root: string,
+    mode: Mode,
+    unreadable: boolean,
+    previousProbe: string | undefined,
+  ): Promise<void> {
+    // a root that cannot be inspected is not known to be gone, and neither is what is below it
+    if (!unreadable) remove(root, true, undefined, mode !== "seed");
+    kinds.set(root, "missing");
+    // a deeper folder may be created while the watcher is being attached, and would then never be seen
+    let ancestor = await nearestDirectory(root);
+    const attached = new Set<string>();
+    for (;;) {
+      probes.set(root, ancestor);
+      natives.ensure(ancestor);
+      attached.add(ancestor);
+      const again = await nearestDirectory(root);
+      if (again === ancestor) break;
+      ancestor = again;
     }
-
-    if (!entries.has(root) && ignored.byStats?.(root, info)) {
-      // watched all the same, so that the path is read again when its stats may have changed
-      kinds.set(root, info.isDirectory() ? "dir" : "file");
-      // a directory has no entry to keep its watch while it is skipped, so the probe does, and unwatch() releases it
-      if (info.isDirectory()) probes.set(root, root);
-      else probes.delete(root);
-      natives.ensure(info.isDirectory() ? root : dirname(root));
-      if (previousProbe) natives.release(previousProbe);
-      if (previousParent) natives.release(previousParent);
-      return;
-    }
-    probes.delete(root);
-    if (info.isDirectory()) {
-      kinds.set(root, "dir");
-      natives.ensure(root);
-      const real = await realpath(root).catch(() => root);
-      await visit(root, info, 0, mode, [], real);
-      await syncDir(root, maxDepth, mode, [real]);
-    } else {
-      kinds.set(root, "file");
-      natives.ensure(dirname(root));
-      await visit(root, info, 0, mode, [], link);
-    }
-    if (previousProbe) natives.release(previousProbe);
-    if (previousParent) natives.release(previousParent);
+    if (previousProbe) attached.add(previousProbe);
+    attached.delete(ancestor);
+    for (const stale of attached) natives.release(stale);
   }
 
   /**
@@ -392,7 +395,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
 
     const seen = new Set<string>();
     const uninspectable = new Set<string>();
-    const inspectFailed = (error: NodeJS.ErrnoException, path: string): undefined => {
+    const failed = (error: NodeJS.ErrnoException, path: string): undefined => {
       fail(error, path);
       if (!VANISHED.has(error.code ?? "")) uninspectable.add(path);
       return undefined;
@@ -400,44 +403,16 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     await Promise.all(
       names.map(async (name) => {
         const path = join(dir, name);
-        if (ignored.byPath(path)) return;
-        const own = await lstat(path).catch((error) => inspectFailed(error, path));
-        if (!own) return;
-        let info = own;
-        let real = join(ancestry.at(-1)!, name);
-        let link: string | undefined;
-        let descend = left;
-        if (own.isSymbolicLink()) {
-          if (followSymlinks) {
-            const target = await stat(path).catch((error) => inspectFailed(error, path));
-            if (!target) return;
-            info = target;
-            if (target.isDirectory()) {
-              const resolved = await realpath(path).catch((error) => inspectFailed(error, path));
-              if (!resolved) return;
-              real = resolved;
-              // a link to a directory already on the way down would loop forever
-              if (ancestry.includes(real)) {
-                descend = 0;
-                // a link that points somewhere else than before is reported by `visit`, with what was below it
-                if (mode === "seed" && entries.get(path)?.link === real) forgetBelow(path);
-              }
-            }
-          } else {
-            link = await readlink(path).catch((error) => inspectFailed(error, path));
-            if (link === undefined) return;
-          }
-        }
-        if (own.isSymbolicLink() || !info.isDirectory()) denied.delete(path);
-        if (!entries.has(path) && ignored.byStats?.(path, info)) return;
+        const found = await inspect(path, left, mode, ancestry, failed);
+        if (!found) return;
         seen.add(path);
         await visit(
           path,
-          info,
-          descend,
+          found.info,
+          found.descend,
           mode,
-          [...ancestry, real],
-          info.isDirectory() ? real : link,
+          [...ancestry, found.real],
+          found.info.isDirectory() ? found.real : found.link,
         );
       }),
     );
@@ -450,6 +425,69 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     for (const path of denied) {
       if (dirname(path) === dir && !listed.has(basename(path))) denied.delete(path);
     }
+  }
+
+  interface Found {
+    info: Stats;
+    /** The real path of the entry, for a directory it is what `ancestry` records. */
+    real: string;
+    link: string | undefined;
+    /** How many levels below it are descended into. */
+    descend: number;
+  }
+
+  type Failed = (error: NodeJS.ErrnoException, path: string) => undefined;
+
+  /** What a name in a directory is, or undefined when it is skipped (ignored, gone, unreadable). */
+  async function inspect(
+    path: string,
+    left: number,
+    mode: Mode,
+    ancestry: readonly string[],
+    failed: Failed,
+  ): Promise<Found | undefined> {
+    if (ignored.byPath(path)) return;
+    const own = await lstat(path).catch((error) => failed(error, path));
+    if (!own) return;
+    let found: Found | undefined = {
+      info: own,
+      real: join(ancestry.at(-1)!, basename(path)),
+      link: undefined,
+      descend: left,
+    };
+    if (own.isSymbolicLink()) {
+      found = followSymlinks
+        ? await followLink(path, found, mode, ancestry, failed)
+        : await readLink(path, found, failed);
+      if (!found) return;
+    }
+    if (own.isSymbolicLink() || !found.info.isDirectory()) denied.delete(path);
+    if (!entries.has(path) && ignored.byStats?.(path, found.info)) return;
+    return found;
+  }
+
+  async function followLink(
+    path: string,
+    found: Found,
+    mode: Mode,
+    ancestry: readonly string[],
+    failed: Failed,
+  ): Promise<Found | undefined> {
+    const info = await stat(path).catch((error) => failed(error, path));
+    if (!info) return;
+    if (!info.isDirectory()) return { ...found, info };
+    const real = await realpath(path).catch((error) => failed(error, path));
+    if (!real) return;
+    // a link to a directory already on the way down would loop forever
+    if (!ancestry.includes(real)) return { ...found, info, real };
+    // a link that points somewhere else than before is reported by `visit`, with what was below it
+    if (mode === "seed" && entries.get(path)?.link === real) forgetBelow(path);
+    return { ...found, info, real, descend: 0 };
+  }
+
+  async function readLink(path: string, found: Found, failed: Failed): Promise<Found | undefined> {
+    const link = await readlink(path).catch((error) => failed(error, path));
+    return link === undefined ? undefined : { ...found, link };
   }
 
   async function visit(

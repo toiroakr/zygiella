@@ -1,7 +1,20 @@
 import { watch as nativeWatch, type FSWatcher as NativeWatcher } from "node:fs";
+import { stat } from "node:fs/promises";
+import { dirname } from "node:path";
 
 export const VANISHED = new Set(["ENOENT", "ENOTDIR"]);
 export const DENIED = new Set(["EACCES", "EPERM"]);
+
+/** The closest directory at or above the parent of `path` that exists. */
+export async function nearestDirectory(path: string): Promise<string> {
+  let ancestor = dirname(path);
+  while (
+    !(await stat(ancestor).catch(() => undefined))?.isDirectory() &&
+    dirname(ancestor) !== ancestor
+  )
+    ancestor = dirname(ancestor);
+  return ancestor;
+}
 
 export interface NativeWatches {
   ensure(dir: string): void;
