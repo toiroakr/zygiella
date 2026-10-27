@@ -552,11 +552,13 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     ancestry: readonly string[],
     failed: Failed,
   ): Promise<Found | undefined> {
-    const info = await unsettled(path, () => stat(path)).catch((error) => failed(error, path));
-    if (!info) return;
-    if (!info.isDirectory()) return { ...found, info };
-    const real = await realpath(path).catch((error) => failed(error, path));
-    if (!real) return;
+    const target = await unsettled(path, async () => {
+      const info = await stat(path);
+      return { info, real: info.isDirectory() ? await realpath(path) : undefined };
+    }).catch((error) => failed(error, path));
+    if (!target) return;
+    const { info, real } = target;
+    if (!real) return { ...found, info };
     // a link to a directory already on the way down would loop forever
     if (!ancestry.includes(real)) return { ...found, info, real };
     // a link that points somewhere else than before is reported by `visit`, with what was below it
