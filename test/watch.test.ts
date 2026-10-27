@@ -1578,17 +1578,21 @@ describe("snapshot", () => {
     await writeFile(join(dir, "sub", "a.txt"), "1");
     await writeFile(join(dir, "sub", "b.txt"), "1");
     const { w } = await start(dir);
-    let unlinks = 0;
-    w.on("unlink", () => {
-      unlinks++;
+    const reported: string[] = [];
+    w.on("unlink", (path) => {
+      reported.push(path);
       void w.close();
     });
     await rm(join(dir, "sub"), { recursive: true });
-    await until(() => unlinks > 0);
+    await until(() => reported.length > 0);
     await w.close();
     await settle(100);
-    expect(unlinks).toBe(1);
-    expect(w.snapshot().entries.map((e) => e.path)).toContain(join(dir, "sub"));
+    expect(reported).toHaveLength(1);
+    const left = w.snapshot().entries.map((e) => e.path);
+    const other = [join(dir, "sub", "a.txt"), join(dir, "sub", "b.txt")].find(
+      (p) => p !== reported[0],
+    )!;
+    expect(left).toEqual(expect.arrayContaining([join(dir, "sub"), other]));
   });
 
   test("a directory is in the snapshot as a directory with the file entries around it", async () => {
