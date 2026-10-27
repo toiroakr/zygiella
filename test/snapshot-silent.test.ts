@@ -1,4 +1,4 @@
-import { mkdtemp, realpath, rm as removeOnce, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm as removeOnce, symlink, unlink, writeFile } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,3 +48,27 @@ test("a write that settles after the last rescan() is the state the snapshot rec
   const entry = watcher.snapshot().entries.find((e) => e.path === join(dir, "a.txt"));
   expect(entry?.size).toBe(3);
 });
+
+test.skipIf(process.platform === "win32")(
+  "a link retargeted again while its change settles is recorded with the last target",
+  async () => {
+    await writeFile(join(dir, "t1"), "");
+    await symlink(join(dir, "t1"), join(dir, "link"));
+    watcher = watch(dir, {
+      ignoreInitial: true,
+      followSymlinks: false,
+      awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 20 },
+    });
+    const seen: string[] = [];
+    watcher.on("change", (path) => seen.push(path));
+    await watcher.ready;
+    await unlink(join(dir, "link"));
+    await symlink(join(dir, "t22"), join(dir, "link"));
+    await watcher.rescan();
+    await unlink(join(dir, "link"));
+    await symlink(join(dir, "t333"), join(dir, "link"));
+    await until(() => seen.length > 0);
+    const entry = watcher.snapshot().entries.find((e) => e.path === join(dir, "link"));
+    expect(entry?.link).toBe(join(dir, "t333"));
+  },
+);

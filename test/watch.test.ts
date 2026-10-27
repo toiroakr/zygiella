@@ -1691,6 +1691,67 @@ describe("snapshot", () => {
     },
   );
 
+  test.skipIf(process.platform === "win32")(
+    "below a link back to an ancestor only what a watched root covers is kept",
+    async () => {
+      await mkdir(join(dir, "x"));
+      await writeFile(join(dir, "x", "f.txt"), "1");
+      await writeFile(join(dir, "a.txt"), "1");
+      await symlink(dir, join(dir, "loop"), "dir");
+      const snapshot = await stopped(dir);
+      const copy = (from: string, to: string) => {
+        const entry = snapshot.entries.find((e) => e.path === from)!;
+        snapshot.entries.push({ ...entry, path: to });
+      };
+      copy(join(dir, "x"), join(dir, "loop", "x"));
+      copy(join(dir, "x", "f.txt"), join(dir, "loop", "x", "f.txt"));
+      copy(join(dir, "a.txt"), join(dir, "loop", "a.txt"));
+      const { w } = await start([dir, join(dir, "loop", "x")], { since: snapshot });
+      const left = w.snapshot().entries.map((e) => e.path);
+      expect(left).toContain(join(dir, "loop", "x", "f.txt"));
+      expect(left).not.toContain(join(dir, "loop", "a.txt"));
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "a root below a link back to an ancestor keeps the directories above it too",
+    async () => {
+      await mkdir(join(dir, "m", "sub"), { recursive: true });
+      await writeFile(join(dir, "m", "sub", "f.txt"), "1");
+      await symlink(dir, join(dir, "loop"), "dir");
+      const snapshot = await stopped(dir);
+      for (const rel of [["m"], ["m", "sub"], ["m", "sub", "f.txt"]]) {
+        const entry = snapshot.entries.find((e) => e.path === join(dir, ...rel))!;
+        snapshot.entries.push({ ...entry, path: join(dir, "loop", ...rel) });
+      }
+      const { w } = await start([dir, join(dir, "loop", "m", "sub")], { since: snapshot });
+      const left = w.snapshot().entries.map((e) => e.path);
+      expect(left).toEqual(
+        expect.arrayContaining([join(dir, "loop", "m"), join(dir, "loop", "m", "sub", "f.txt")]),
+      );
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "a link that now points back to an ancestor reports what was below it as unlink",
+    async () => {
+      await mkdir(join(dir, "sub"));
+      await writeFile(join(dir, "sub", "old.txt"), "1");
+      await symlink(join(dir, "sub"), join(dir, "link"), "dir");
+      const snapshot = await stopped(dir);
+      await rm(join(dir, "link"));
+      await symlink(dir, join(dir, "link"), "dir");
+      const { seen } = await start(dir, { since: snapshot });
+      expect(seen).toEqual(
+        expect.arrayContaining([
+          ["unlink", join(dir, "link", "old.txt")],
+          ["unlinkDir", join(dir, "link")],
+          ["addDir", join(dir, "link")],
+        ]),
+      );
+    },
+  );
+
   test("a directory is in the snapshot as a directory with the file entries around it", async () => {
     await mkdir(join(dir, "sub"));
     await writeFile(join(dir, "sub", "a.txt"), "12");

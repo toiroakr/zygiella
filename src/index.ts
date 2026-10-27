@@ -548,13 +548,20 @@ export class FSWatcher extends EventEmitter<Events> {
 
   /**
    * Forgets what a snapshot put below a link back to an ancestor, which is never descended into: nothing would scan
-   * it, so it would stay in the baseline after the file is gone. A path that is itself a watched root, or has one
-   * below it, is scanned through that root and keeps its entries.
+   * it, so it would stay in the baseline after the file is gone. What a watched root at or below that path covers is
+   * scanned through that root and keeps its entries, and so do the directories between that path and the root.
    */
   #forgetBelow(path: string): void {
-    if (!this.#children.get(path)?.size || [...this.#roots].some((root) => within(path, root)))
-      return;
-    this.#remove(path, false, (key) => key !== path);
+    if (!this.#children.get(path)?.size) return;
+    this.#remove(
+      path,
+      false,
+      (key) =>
+        key !== path &&
+        ![...this.#roots].some(
+          (root) => within(path, root) && (within(root, key) || within(key, root)),
+        ),
+    );
   }
 
   #stat(path: string): Promise<Stats> {
@@ -608,7 +615,9 @@ export class FSWatcher extends EventEmitter<Events> {
               // a link to a directory already on the way down would loop forever
               if (ancestry.includes(real)) {
                 descend = 0;
-                if (mode === "seed") this.#forgetBelow(path);
+                // a link that points somewhere else than before is reported by #visit, with what was below it
+                if (mode === "seed" && this.#entries.get(path)?.link === real)
+                  this.#forgetBelow(path);
               }
             }
           } else {
@@ -792,6 +801,10 @@ export class FSWatcher extends EventEmitter<Events> {
     let since = Date.now();
     const poll = async (): Promise<void> => {
       const info = await this.#stat(path).catch(() => undefined);
+      const link =
+        !this.#followSymlinks && info?.isSymbolicLink()
+          ? await readlink(path).catch(() => undefined)
+          : undefined;
       if (this.#settling.get(path) !== job) return;
       // gone: the directory diff reports the unlink, and needs this job to know whether the add was ever announced
       if (!info) return;
@@ -809,6 +822,7 @@ export class FSWatcher extends EventEmitter<Events> {
             mtimeMs: info.mtimeMs,
             size: info.size,
             ino: info.ino,
+            link: link ?? entry.link,
           });
         this.#dispatch(job.event, path);
         return;
