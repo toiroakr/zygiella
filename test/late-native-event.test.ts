@@ -3,14 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-// only the delivery of the native `change` events is replaced: while `held`, they are kept and `release` hands them over
+// the native `change` events of the OS are kept back and the test delivers them itself, so that when the watcher is told
+// about a write is the test's choice and not the timing of FSEvents / inotify
 const native = vi.hoisted(() => ({
-  held: false,
-  delivered: 0,
-  kept: [] as Array<() => void>,
-  release() {
-    native.held = false;
-    for (const deliver of native.kept.splice(0)) deliver();
+  listeners: [] as Array<() => void>,
+  sizesRead: [] as number[],
+  watched: "",
+  deliver() {
+    for (const listener of native.listeners) listener();
   },
 }));
 
@@ -22,16 +22,24 @@ vi.mock("node:fs", async (importOriginal) => {
       const watcher = actual.watch(...args);
       const on = watcher.on.bind(watcher) as (event: string, listener: () => void) => unknown;
       watcher.on = ((event: string, listener: () => void) => {
-        if (event !== "change") return on(event, listener);
-        return on(event, () => {
-          native.delivered++;
-          if (native.held) native.kept.push(listener);
-          else listener();
-        });
+        if (event === "change") native.listeners.push(listener);
+        return event === "change" ? watcher : on(event, listener);
       }) as typeof watcher.on;
       return watcher;
     }) as typeof actual.watch,
   };
+});
+
+// the sizes the watcher read for the watched file, so the test can wait for the read that saw the truncated file
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  const recording = (read: typeof actual.stat): typeof actual.stat =>
+    (async (path: string, ...rest: unknown[]) => {
+      const info = await (read as (...args: unknown[]) => Promise<{ size: number }>)(path, ...rest);
+      if (path === native.watched) native.sizesRead.push(info.size);
+      return info;
+    }) as typeof actual.stat;
+  return { ...actual, stat: recording(actual.stat), lstat: recording(actual.lstat) };
 });
 
 const { watch } = await import("../src/index.ts");
@@ -46,9 +54,9 @@ let watchers: FSWatcher[];
 beforeEach(async () => {
   dir = await realpath(await mkdtemp(join(tmpdir(), "zygiella-")));
   watchers = [];
-  native.held = false;
-  native.delivered = 0;
-  native.kept = [];
+  native.listeners = [];
+  native.sizesRead = [];
+  native.watched = "";
 });
 
 afterEach(async () => {
@@ -70,6 +78,7 @@ describe("a write whose native event arrives after the quiet period", () => {
   test("is reported as one change when the file was truncated at the first read and complete at the second", async () => {
     const file = join(dir, "a.txt");
     await writeFile(file, "1");
+    native.watched = file;
     const w = watch(file, { ignoreInitial: true });
     watchers.push(w);
     const seen: Array<[string, string]> = [];
@@ -77,13 +86,11 @@ describe("a write whose native event arrives after the quiet period", () => {
     await new Promise<void>((r) => w.once("ready", () => r()));
 
     await truncate(file, 0);
-    await until(() => native.delivered > 0);
-    // let the read triggered by the truncate see the empty file before the write starts
-    await settle(10);
-    native.held = true;
+    native.deliver();
+    await until(() => native.sizesRead.includes(0));
     await writeFile(file, "22");
     await until(() => seen.length > 0);
-    native.release();
+    native.deliver();
     await settle();
 
     expect(seen).toEqual([["change", file]]);
