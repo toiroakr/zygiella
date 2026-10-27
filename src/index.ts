@@ -5,7 +5,8 @@ import { basename, dirname, join, sep } from "node:path";
 import { pendingEvents } from "./pending.ts";
 import { DENIED, VANISHED, nativeWatches } from "./native.ts";
 import { recorded, seedEntries, toSnapshot } from "./snapshot.ts";
-import { EDITOR_TEMP, list, matcher, within, type Matcher } from "./match.ts";
+import { list, within } from "./match.ts";
+import { resolveOptions } from "./options.ts";
 import type {
   Entry,
   Events,
@@ -26,9 +27,6 @@ export type {
 } from "./types.ts";
 
 const READY_SETTLE_MS = 50;
-const ATOMIC_MS = 100;
-// setTimeout treats a delay above 2 ** 31 - 1 as 1 ms
-const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /**
  * quiet: remember only. initial: report at once (it is what `ready` waits for). seed: initial against a snapshot, so
@@ -70,27 +68,17 @@ export interface FSWatcher extends EventEmitter<Events> {
 
 export function watch(paths: string | readonly string[], options: WatchOptions = {}): FSWatcher {
   const emitter = new EventEmitter<Events>();
-  const atomic = options.atomic ?? true;
-  const atomicMs = atomic === true ? ATOMIC_MS : atomic || 0;
-  const userIgnored = matcher(options.ignored);
-  const ignored: Matcher =
-    atomicMs > 0
-      ? { ...userIgnored, byPath: (path) => EDITOR_TEMP.test(path) || userIgnored.byPath(path) }
-      : userIgnored;
-  const ignoreInitial = options.ignoreInitial ?? false;
-  const maxDepth = options.depth ?? Infinity;
-  const followSymlinks = options.followSymlinks ?? true;
-  const ignorePermissionErrors = options.ignorePermissionErrors ?? false;
-  const persistent = options.persistent ?? true;
-  const rescanInterval = options.rescanInterval ?? 0;
-  // `false` and `""` would pass the range test by coercion, and setTimeout reads them as 1 ms
-  if (
-    typeof rescanInterval !== "number" ||
-    !(rescanInterval >= 0 && rescanInterval <= MAX_TIMER_MS)
-  )
-    throw new RangeError(
-      `rescanInterval must be a number from 0 to ${MAX_TIMER_MS} ms, got ${String(rescanInterval)}`,
-    );
+  const {
+    ignored,
+    atomicMs,
+    ignoreInitial,
+    maxDepth,
+    followSymlinks,
+    ignorePermissionErrors,
+    persistent,
+    rescanInterval,
+    settle,
+  } = resolveOptions(options);
 
   const watchedRoots = new Set<string>();
   const kinds = new Map<string, "dir" | "file" | "missing">();
@@ -107,37 +95,15 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   let closed = false;
   let ready: Promise<ReadyResult>;
 
-  const natives = nativeWatches({
-    persistent,
-    needed: (dir) => needed(dir),
-    onChange: (dir) => onNative(dir),
-    onError: (error, dir) => fail(error, dir),
-  });
-  const awf = options.awaitWriteFinish;
+  const natives = nativeWatches({ persistent, needed, onChange: onNative, onError: fail });
   const pending = pendingEvents({
     atomic: atomicMs,
-    settle: awf
-      ? {
-          stabilityThreshold: (typeof awf === "object" && awf.stabilityThreshold) || 2000,
-          pollInterval: (typeof awf === "object" && awf.pollInterval) || 100,
-        }
-      : undefined,
+    settle,
     followSymlinks,
-    timeout: (fn, ms) => timeout(fn, ms),
-    dispatch: (event, path) => dispatch(event, path),
-    stat: (path) => followStat(path),
-    settled: (path, info, link) => {
-      // the file may have been written again since the entry was read, with no native event to read it again
-      const entry = entries.get(path);
-      if (entry && !entry.dir)
-        entries.set(path, {
-          ...entry,
-          mtimeMs: info.mtimeMs,
-          size: info.size,
-          ino: info.ino,
-          link: info.isSymbolicLink() ? (link ?? entry.link) : undefined,
-        });
-    },
+    timeout,
+    dispatch,
+    stat: followStat,
+    settled,
   });
 
   /**
@@ -153,6 +119,19 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     }
     for (const [path, entry] of pending.heldEntries()) recordedEntries.push(recorded(path, entry));
     return toSnapshot(recordedEntries);
+  }
+
+  /** The file settled at this size and mtime: the entry may not know yet, as no native event reads it again. */
+  function settled(path: string, info: Stats, link: string | undefined): void {
+    const entry = entries.get(path);
+    if (entry && !entry.dir)
+      entries.set(path, {
+        ...entry,
+        mtimeMs: info.mtimeMs,
+        size: info.size,
+        ino: info.ino,
+        link: info.isSymbolicLink() ? (link ?? entry.link) : undefined,
+      });
   }
 
   /** Remembers what `since` holds for the watched roots, so the first scan reports only the difference. */
