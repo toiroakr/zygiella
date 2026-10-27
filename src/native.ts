@@ -154,7 +154,8 @@ export function nativeWatches({
       }
     },
     covered(dir, keep) {
-      unwatched.delete(dir);
+      // a tree watch that was given up on stays listed: another tree reporting the directory does not repair it
+      if (!blockedTrees.has(dir)) unwatched.delete(dir);
       if (keep) return;
       watchers.get(dir)?.close();
       watchers.delete(dir);
