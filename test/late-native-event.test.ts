@@ -150,12 +150,7 @@ describe("a read of the file that completes after the change was reported", () =
   test("does not report the write again when it had seen the truncated file", async () => {
     const file = join(dir, "a.txt");
     await writeFile(file, "1");
-    native.watched = file;
-    const w = watch(file, { ignoreInitial: true });
-    watchers.push(w);
-    const seen: Array<[string, string]> = [];
-    w.on("all", (event, path) => seen.push([event, path]));
-    await new Promise<void>((r) => w.once("ready", () => r()));
+    const seen = await watching(file, file);
 
     await truncate(file, 0);
     native.deliver();
