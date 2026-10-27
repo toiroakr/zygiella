@@ -473,7 +473,7 @@ describe("a read of the file that completes after the change was reported", () =
       await until(() => native.held);
       await replaceLink(file2);
       native.releaseRefresh();
-      await until(() => seen.length > 0);
+      await until(() => seen.some(([, path]) => path === link));
       native.open();
       await w.rescan();
 
