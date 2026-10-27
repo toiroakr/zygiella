@@ -75,7 +75,8 @@ The whole library is `src/index.ts`; the tests are `test/watch.test.ts` and run 
   `job.before` when the file had a change waiting. A root whose `stat` fails for a reason other than
   ENOENT/ENOTDIR (permission) keeps what is below it in any mode, instead of reporting it as removed, so `rescan()`
   does not turn a still unreadable root into `unlink` for every seeded entry. After the first scan, `#pruneUnread` drops what was seeded below a directory that was
-  never read (a link back to an ancestor), unless its root could not be inspected, so no entry stays that no scan can reach.
+  never read (a link back to an ancestor), unless its root could not be inspected, so no entry stays that no scan can reach. The `awaitWriteFinish` poll writes the final stable `stat` into the entry before it dispatches, so a
+  write that settles after the last scan is what the snapshot records (nothing else reads it again where native events are silent).
 - With `atomic`, the unlink of a file is held back in `#unlinks` for the window, and an `add` announced for the same
   path in that time becomes a `change`. A removed directory reports what is below it at once, flushing held unlinks
   first. `atomic` also adds the editor temporary file patterns to `ignored`.

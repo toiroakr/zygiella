@@ -802,6 +802,15 @@ export class FSWatcher extends EventEmitter<Events> {
         since = Date.now();
       } else if (Date.now() - since >= settle.stabilityThreshold) {
         this.#settling.delete(path);
+        // the file may have been written again since the entry was read, with no native event to read it again
+        const entry = this.#entries.get(path);
+        if (entry && !entry.dir)
+          this.#entries.set(path, {
+            ...entry,
+            mtimeMs: info.mtimeMs,
+            size: info.size,
+            ino: info.ino,
+          });
         this.#dispatch(job.event, path);
         return;
       }
