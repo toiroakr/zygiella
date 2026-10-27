@@ -822,7 +822,7 @@ export class FSWatcher extends EventEmitter<Events> {
             mtimeMs: info.mtimeMs,
             size: info.size,
             ino: info.ino,
-            link: link ?? entry.link,
+            link: info.isSymbolicLink() ? (link ?? entry.link) : undefined,
           });
         this.#dispatch(job.event, path);
         return;

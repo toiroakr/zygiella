@@ -75,3 +75,27 @@ test.skipIf(process.platform === "win32")(
     expect(entry?.link).toBe(join(dir, "t333"));
   },
 );
+
+test.skipIf(process.platform === "win32")(
+  "a link replaced by a regular file while its change settles is recorded without a link target",
+  async () => {
+    await writeFile(join(dir, "t1"), "");
+    await symlink(join(dir, "t1"), join(dir, "link"));
+    watcher = watch(dir, {
+      ignoreInitial: true,
+      followSymlinks: false,
+      awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 20 },
+    });
+    const seen: string[] = [];
+    watcher.on("change", (path) => seen.push(path));
+    await watcher.ready;
+    await symlink(join(dir, "t22"), join(dir, ".next-link"));
+    await rename(join(dir, ".next-link"), join(dir, "link"));
+    await watcher.rescan();
+    await writeFile(join(dir, ".next-file"), "regular");
+    await rename(join(dir, ".next-file"), join(dir, "link"));
+    await until(() => seen.length > 0);
+    const entry = watcher.snapshot().entries.find((e) => e.path === join(dir, "link"));
+    expect(entry?.link).toBeUndefined();
+  },
+);
