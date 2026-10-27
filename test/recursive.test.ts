@@ -294,6 +294,29 @@ describe.skipIf(!recursiveHere)("on macOS", () => {
     await writeUntil(join(outside, "a.txt"), () => seen.some(([, path]) => path === file));
   });
 
+  test("a file added while its tree was given up on is watched once that tree is unwatched", async () => {
+    const file = join(dir, "a.txt");
+    await writeFile(file, "0");
+    const { w, seen, errors } = await start(dir);
+    native.made
+      .get(`tree:${dir}`)!
+      .emit("error", Object.assign(new Error("limit"), { code: "EMFILE" }));
+    await until(() => errors.length > 0);
+    await w.add(file).ready;
+    w.unwatch(dir);
+    await writeUntil(file, () => seen.some(([, path]) => path === file));
+  });
+
+  test("a root inside another root does not get watches of its own when it is unwatched", async () => {
+    const sub = join(dir, "sub");
+    await mkdir(join(sub, "x", "y"), { recursive: true });
+    const { w } = await start(sub);
+    await w.add(dir).ready;
+    const before = native.calls.length;
+    w.unwatch(sub);
+    expect(native.calls.slice(before).filter((call) => !call.recursive)).toEqual([]);
+  });
+
   test("errors of a root that was unwatched do not count against it when it is added again", async () => {
     // a watched file directly in the root keeps the directory in use, so unwatching the root cannot rely on releasing it
     const file = join(dir, "a.txt");

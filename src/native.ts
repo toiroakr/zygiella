@@ -168,7 +168,8 @@ export function nativeWatches({
       trees.delete(root);
       rewatches.delete(root);
       blocked.delete(root);
-      blockedTrees.delete(root);
+      // the record of a tree watch that was given up on goes with it; one of the directory's own watch stays
+      if (blockedTrees.delete(root)) unwatched.delete(root);
     },
     hasTree: (root) => trees.has(root),
     release(dir) {

@@ -109,6 +109,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   const queues = new Map<string, { dirty: boolean; done: Promise<void> }>();
   const denied = new Set<string>();
   const missingAtStart = new Set<string>();
+  /** The real path of each directory root that has been read, which is what its tree watch reports below it. */
+  const realRoots = new Map<string, string>();
   let retryLimits = false;
   const audits = new Map<string, NodeJS.Timeout>();
   /** For each directory a full read is going through: the paths a named entry read recorded meanwhile. */
@@ -201,6 +203,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
 
   function forget(path: string): void {
     watchedRoots.delete(path);
+    realRoots.delete(path);
     missingAtStart.delete(path);
     for (const key of denied) if (within(path, key)) denied.delete(key);
     kinds.delete(path);
@@ -220,6 +223,10 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     for (const [dir, ancestry] of ancestries)
       if (within(path, dir) && depthLeft.has(dir) && !failed.has(dir) && !physical(dir, ancestry))
         natives.ensure(dir);
+    // and so do the directories that a watched file or a path that does not exist yet is waited for through
+    const waited = new Set(probes.values());
+    for (const root of watchedRoots) if (kinds.get(root) === "file") waited.add(dirname(root));
+    for (const dir of waited) if (!failed.has(dir)) natives.ensure(dir);
   }
 
   /**
@@ -374,6 +381,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     // a finite depth leaves most of the tree unwatched, which one watch for the whole tree cannot do
     if (maxDepth !== Infinity || !natives.ensureTree(root)) natives.ensure(root);
     const real = await realpath(root).catch(() => root);
+    realRoots.set(root, real);
     await visit(root, info, 0, mode, [], real);
     await syncDir(root, maxDepth, mode, [real]);
   }
@@ -504,15 +512,14 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
 
   /**
    * Whether a tree watch reports `dir`: it lies below a root that has one, with no link on the way, so that its real
-   * path is the real path of the root followed by the same names. It is not reported behind a link, nor by the tree of
-   * another root than the one the directory was reached from.
+   * path is the real path of that root followed by the same names. It is not reported behind a link.
    */
   function physical(dir: string, ancestry: readonly string[]): boolean {
     return [...watchedRoots].some(
       (root) =>
         natives.hasTree(root) &&
         within(root, dir) &&
-        join(ancestry[0]!, relative(root, dir)) === ancestry.at(-1),
+        join(realRoots.get(root) ?? root, relative(root, dir)) === ancestry.at(-1),
     );
   }
 
