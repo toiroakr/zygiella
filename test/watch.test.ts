@@ -1586,7 +1586,6 @@ describe("snapshot", () => {
     await rm(join(dir, "sub"), { recursive: true });
     await until(() => reported.length > 0);
     await w.close();
-    await settle(100);
     expect(reported).toHaveLength(1);
     const left = w.snapshot().entries.map((e) => e.path);
     const other = [join(dir, "sub", "a.txt"), join(dir, "sub", "b.txt")].find(
@@ -1594,6 +1593,36 @@ describe("snapshot", () => {
     )!;
     expect(left).toEqual(expect.arrayContaining([join(dir, "sub"), other]));
   });
+
+  test("an entry below a file in the snapshot is dropped, not kept unreachable", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    const snapshot = await stopped(dir);
+    const file = snapshot.entries.find((e) => e.path === join(dir, "a.txt"))!;
+    snapshot.entries.push({ ...file, path: join(dir, "a.txt", "orphan.txt") });
+    const { w } = await start(dir, { since: snapshot });
+    expect(w.snapshot().entries.map((e) => e.path)).not.toContain(join(dir, "a.txt", "orphan.txt"));
+  });
+
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "a root that cannot be inspected for lack of permission keeps its baseline instead of reporting unlink",
+    async () => {
+      await mkdir(join(dir, "outer", "x"), { recursive: true });
+      await writeFile(join(dir, "outer", "x", "a.txt"), "1");
+      const snapshot = await stopped(join(dir, "outer", "x"));
+      await chmod(join(dir, "outer"), 0o000);
+      try {
+        const { w, seen } = await start(join(dir, "outer", "x"), {
+          since: snapshot,
+          ignorePermissionErrors: true,
+        });
+        await settle();
+        expect(seen).toEqual([]);
+        expect(w.snapshot().entries.map((e) => e.path)).toContain(join(dir, "outer", "x", "a.txt"));
+      } finally {
+        await chmod(join(dir, "outer"), 0o755);
+      }
+    },
+  );
 
   test("a directory is in the snapshot as a directory with the file entries around it", async () => {
     await mkdir(join(dir, "sub"));

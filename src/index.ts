@@ -298,7 +298,7 @@ export class FSWatcher extends EventEmitter<Events> {
       if (skipped) continue;
       // below an entry that is missing, it can never be reached from its parent, and would stay in the baseline
       if (!roots.includes(entry.path) && !kept.has(dirname(entry.path))) continue;
-      kept.add(entry.path);
+      if (entry.dir) kept.add(entry.path);
       const { dir, mtimeMs, size, ino, link } = entry;
       this.#setEntry(entry.path, { dir, mtimeMs, size, ino, link });
     }
@@ -435,8 +435,10 @@ export class FSWatcher extends EventEmitter<Events> {
     const previousProbe = this.#probes.get(root);
     const previousParent = this.#kinds.get(root) === "file" ? dirname(root) : undefined;
     if (mode !== "live") this.#missingAtStart.delete(root);
+    let unreadable = false;
     let info = await this.#stat(root).catch((error: NodeJS.ErrnoException) => {
       this.#fail(error, root);
+      unreadable = !VANISHED.has(error.code ?? "");
       if (mode !== "live" && VANISHED.has(error.code ?? "")) this.#missingAtStart.add(root);
       return undefined;
     });
@@ -449,7 +451,8 @@ export class FSWatcher extends EventEmitter<Events> {
     if (info && !info.isDirectory()) this.#denied.delete(root);
 
     if (!info) {
-      this.#remove(root, true, undefined, mode !== "seed");
+      // what a snapshot says is below a root that cannot be inspected is not known to be gone
+      if (!(mode === "seed" && unreadable)) this.#remove(root, true, undefined, mode !== "seed");
       this.#kinds.set(root, "missing");
       const nearest = async (): Promise<string> => {
         let ancestor = dirname(root);
