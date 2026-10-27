@@ -150,7 +150,7 @@ describe("a read of the file that completes after the change was reported", () =
   test("does not report the write again when it had seen the truncated file", async () => {
     const file = join(dir, "a.txt");
     await writeFile(file, "1");
-    const seen = await watching(file, file);
+    const { w, seen } = await watching(file, file);
 
     await truncate(file, 0);
     native.deliver();
@@ -160,9 +160,11 @@ describe("a read of the file that completes after the change was reported", () =
     await until(() => native.held);
     await writeFile(file, "22");
     await until(() => seen.length > 0);
+    const reads = native.sizesRead.length;
     native.open();
-    await settle();
+    await until(() => native.sizesRead.length > reads || seen.length > 1);
 
     expect(seen).toEqual([["change", file]]);
+    expect(w.snapshot().entries.find((entry) => entry.path === file)?.size).toBe(2);
   });
 });
