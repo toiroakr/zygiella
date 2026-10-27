@@ -15,6 +15,7 @@ const native = vi.hoisted(() => ({
   made: new Map<string, { emit: (event: string, error: Error) => boolean }>(),
   closed: [] as string[],
   failTree: false,
+  fail: new Set<string>(),
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -28,6 +29,8 @@ vi.mock("node:fs", async (importOriginal) => {
         throw Object.assign(new Error("recursive watching is not supported"), {
           code: "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM",
         });
+      if (!recursive && native.fail.has(String(path)))
+        throw Object.assign(new Error("ENOSPC: cannot watch"), { code: "ENOSPC" });
       if (recursive && native.failTree)
         throw Object.assign(new Error("EMFILE: too many open files, watch"), { code: "EMFILE" });
       const watcher = (
@@ -68,6 +71,7 @@ beforeEach(async () => {
   native.closed.length = 0;
   native.unsupported = false;
   native.failTree = false;
+  native.fail.clear();
 });
 
 afterEach(async () => {
@@ -93,6 +97,15 @@ async function until(predicate: () => boolean, ms = 3000): Promise<void> {
     if (Date.now() > deadline) throw new Error("timed out waiting for the condition");
     await new Promise((r) => setTimeout(r, 10));
   }
+}
+
+/** Writes `file` again until `reported()`: the OS may not deliver yet for a watch that was just attached. */
+async function writeUntil(file: string, reported: () => boolean): Promise<void> {
+  for (let i = 0; !reported() && i < 100; i++) {
+    await writeFile(file, String(i));
+    await new Promise((r) => setTimeout(r, 30));
+  }
+  expect(reported()).toBe(true);
 }
 
 const tree = async (count: number) => {
@@ -136,19 +149,20 @@ describe.skipIf(!recursiveHere)("on macOS", () => {
       { path: dir, recursive: true },
       { path: join(dir, "link"), recursive: false },
     ]);
-    await writeFile(join(outside, "a.txt"), "1");
-    await until(() => seen.length > 0);
-    expect(seen).toEqual([["add", join(dir, "link", "a.txt")]]);
+    await writeUntil(join(outside, "a.txt"), () => seen.length > 0);
+    expect(seen[0]).toEqual(["add", join(dir, "link", "a.txt")]);
   });
 
   test("a directory created below a followed link is watched on its own", async () => {
     await symlink(outside, join(dir, "link"));
     const { seen } = await start(dir);
+    // a file first: the watch on the link delivers once this is reported, so the directory below is not missed
+    await writeUntil(join(outside, "armed.txt"), () => seen.length > 0);
     await mkdir(join(outside, "sub"));
     await until(() => native.calls.some((call) => call.path === join(dir, "link", "sub")));
-    await writeFile(join(outside, "sub", "a.txt"), "1");
-    await until(() => seen.some(([event]) => event === "add"));
-    expect(seen).toContainEqual(["add", join(dir, "link", "sub", "a.txt")]);
+    const file = join(dir, "link", "sub", "a.txt");
+    await writeUntil(join(outside, "sub", "a.txt"), () => seen.some(([, path]) => path === file));
+    expect(seen).toContainEqual(["add", file]);
   });
 
   test("without followSymlinks the whole tree is one native watch", async () => {
@@ -165,11 +179,36 @@ describe.skipIf(!recursiveHere)("on macOS", () => {
       .emit("error", Object.assign(new Error("limit"), { code: "EMFILE" }));
     await until(() => errors.length > 0);
     expect(w.unwatched).toEqual([dir]);
-    await new Promise((r) => setTimeout(r, 200));
     expect(native.calls.filter((call) => call.recursive)).toHaveLength(1);
     await w.rescan();
     expect(w.unwatched).toEqual([]);
     expect(native.calls.filter((call) => call.recursive)).toHaveLength(2);
+  });
+
+  test("a change below a subdirectory that was missed while the recursive watch failed is reported", async () => {
+    await tree(2);
+    const { seen, errors } = await start(dir);
+    // watching the tree again fails too, so the directories below the root are only found by reading them
+    native.failTree = true;
+    native.made
+      .get(`tree:${dir}`)!
+      .emit("error", Object.assign(new Error("lost"), { code: "EIO" }));
+    await writeFile(join(dir, "d1", "inner", "missed.txt"), "1");
+    await until(() => errors.length > 0);
+    await until(() => seen.some(([, path]) => path.endsWith("missed.txt")), 4000);
+    expect(seen).toContainEqual(["add", join(dir, "d1", "inner", "missed.txt")]);
+  });
+
+  test("directories that failed one by one are no longer listed once a recursive watch covers them", async () => {
+    await tree(2);
+    native.failTree = true;
+    native.fail.add(join(dir, "d1"));
+    const { w } = await start(dir);
+    expect(w.unwatched).toEqual([join(dir, "d1")]);
+    native.failTree = false;
+    native.fail.clear();
+    await w.rescan();
+    expect(w.unwatched).toEqual([]);
   });
 
   test("unwatch() closes the recursive watch", async () => {
@@ -197,7 +236,8 @@ describe("where recursive watching is not available", () => {
     await tree(2);
     const { errors, seen } = await start(dir);
     expect(errors).toEqual([]);
-    await writeFile(join(dir, "d1", "inner", "a.txt"), "1");
-    await until(() => seen.length > 0);
+    const file = join(dir, "d1", "inner", "a.txt");
+    await writeUntil(file, () => seen.some(([, path]) => path === file));
+    expect(errors).toEqual([]);
   });
 });

@@ -36,6 +36,10 @@ export interface NativeWatches {
   ensureTree(root: string): boolean;
   /** Whether a tree watch already reports what happens in `dir`. */
   covers(dir: string): boolean;
+  /** `dir` is reported by a tree watch from now on: it is no longer listed as unwatched and needs no watch of its own. */
+  covered(dir: string): void;
+  /** Lets `ensure` and `ensureTree` try again where a limit was hit; only `rescan()` does this. */
+  retry(): void;
   release(dir: string): void;
   /** Directories (or tree roots) that are read but have no native watch, sorted. */
   unwatched(): string[];
@@ -64,6 +68,8 @@ export function nativeWatches({
   const trees = new Map<string, NativeWatcher>();
   const unwatched = new Set<string>();
   const rewatches = new Map<string, number>();
+  // keys whose watch was given up on: only rescan() asks for another try, not a read that happens to pass by
+  const blocked = new Set<string>();
   let treesUnavailable = false;
   let closed = false;
 
@@ -79,6 +85,7 @@ export function nativeWatches({
     watcher: NativeWatcher,
     open: Map<string, NativeWatcher>,
     error: NodeJS.ErrnoException,
+    reconcile: () => void,
   ): void => {
     open.delete(key);
     watcher.close();
@@ -87,22 +94,27 @@ export function nativeWatches({
     // sync too, which watches the directory again
     const tries = rewatches.get(key) ?? 0;
     if (!VANISHED.has(error.code ?? "")) {
-      if (EXHAUSTED.has(error.code ?? "") || tries >= MAX_REWATCHES) return;
+      if (EXHAUSTED.has(error.code ?? "") || tries >= MAX_REWATCHES) {
+        blocked.add(key);
+        return;
+      }
       rewatches.set(key, tries + 1);
     }
-    onChange(key);
+    reconcile();
   };
 
   return {
     ensure(dir) {
-      if (closed || watchers.has(dir)) return;
+      if (closed || watchers.has(dir) || blocked.has(dir)) return;
       try {
         const watcher = nativeWatch(dir, { persistent });
         watcher.on("change", (_type, name) => {
           rewatches.delete(dir);
           onChange(dir, name ? String(name) : undefined);
         });
-        watcher.on("error", (error: NodeJS.ErrnoException) => lost(dir, watcher, watchers, error));
+        watcher.on("error", (error: NodeJS.ErrnoException) =>
+          lost(dir, watcher, watchers, error, () => onChange(dir)),
+        );
         watchers.set(dir, watcher);
         unwatched.delete(dir);
       } catch (error) {
@@ -110,7 +122,7 @@ export function nativeWatches({
       }
     },
     ensureTree(root) {
-      if (closed || !TREE_WATCH || treesUnavailable) return false;
+      if (closed || !TREE_WATCH || treesUnavailable || blocked.has(root)) return false;
       if (trees.has(root)) return true;
       try {
         const watcher = nativeWatch(root, { persistent, recursive: true });
@@ -120,7 +132,10 @@ export function nativeWatches({
           const path = join(root, String(name));
           onChange(dirname(path), basename(path));
         });
-        watcher.on("error", (error: NodeJS.ErrnoException) => lost(root, watcher, trees, error));
+        watcher.on("error", (error: NodeJS.ErrnoException) =>
+          // what was missed anywhere below the root is only found by reading all of it
+          lost(root, watcher, trees, error, () => onLost(root)),
+        );
         trees.set(root, watcher);
         unwatched.delete(root);
         return true;
@@ -130,11 +145,18 @@ export function nativeWatches({
         return false;
       }
     },
+    covered(dir) {
+      unwatched.delete(dir);
+      watchers.get(dir)?.close();
+      watchers.delete(dir);
+    },
+    retry: () => blocked.clear(),
     covers: (dir) => [...trees.keys()].some((root) => within(root, dir)),
     release(dir) {
       if (needed(dir)) return;
       unwatched.delete(dir);
       rewatches.delete(dir);
+      blocked.delete(dir);
       watchers.get(dir)?.close();
       watchers.delete(dir);
       trees.get(dir)?.close();
@@ -148,6 +170,7 @@ export function nativeWatches({
       trees.clear();
       unwatched.clear();
       rewatches.clear();
+      blocked.clear();
     },
   };
 }

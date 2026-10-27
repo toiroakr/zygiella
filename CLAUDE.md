@@ -47,11 +47,14 @@ set), `pending.ts` (add / change waiting to settle and unlinks held for `atomic`
   root and everything below it with one `recursive: true` watch (not with a finite `depth`). `covers` says whether a
   tree watch reports a directory, and `physical` in `index.ts` whether it can: a directory behind a followed link is
   not under the tree physically, so it keeps its own watch. A tree watch that is not available or fails to open
-  falls back to one watch per directory. Native events are not trusted for their type: every event re-reads the
+  falls back to one watch per directory. Native events are not trusted for their type: every event (except in a large directory, below) re-reads the
   directory and diffs it against a snapshot (`entries`), and the diff produces the reports. This absorbs coalesced
   and duplicated events on every platform. Only in a directory with more than `LARGE_DIRECTORY` entries is the name
   of the event trusted (`syncName`), because the full read costs 0.2 to 1 s there; `audit` reads that directory whole
-  once `AUDIT_QUIET_MS` after its last event, which is what repairs an event the OS lost.
+  once `AUDIT_QUIET_MS` after its last event (through `onNative` without a name, so dependent file roots and
+  missing-path probes are synced too), which repairs an event the OS lost when others of that directory arrived.
+  `isLarge` counts tracked entries, so entries under `ignored` do not count. A full read and a named read of one
+  directory run in different queues; `scanning` makes the full read keep what a named read recorded meanwhile.
 - A native watcher error is retried by one re-sync of its directory, except `EMFILE` / `ENOSPC` and the fourth error
   in a row without an event (`native.ts`); a re-watch after `EMFILE` on macOS made libuv rebuild its one stream for
   every handle, and the process never reached `ready`.

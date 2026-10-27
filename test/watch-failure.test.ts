@@ -194,12 +194,29 @@ describe("a watch that could not be established", () => {
       .get(join(dir, "sub"))!
       .emit("error", Object.assign(new Error("limit"), { code: "EMFILE" }));
     await until(() => errors.length > 0);
-    await new Promise((r) => setTimeout(r, 200));
     expect(native.calls.get(join(dir, "sub"))).toBe(1);
     expect(w.unwatched).toEqual([join(dir, "sub")]);
     await w.rescan();
     expect(native.calls.get(join(dir, "sub"))).toBe(2);
     expect(w.unwatched).toEqual([]);
+  });
+
+  test("a directory whose watcher hit a limit is not watched again by a read that is not a rescan", async () => {
+    await mkdir(join(dir, "sub"));
+    const { w, errors } = await start(dir);
+    const sub = join(dir, "sub");
+    const watcher = native.made.get(sub)!;
+    watcher.emit("error", Object.assign(new Error("limit"), { code: "EMFILE" }));
+    await until(() => errors.length > 0);
+    // a late event of the closed watcher makes zygiella read the directory, as an audit or a parent's event would
+    (watcher as unknown as { emit: (event: string, ...args: unknown[]) => boolean }).emit(
+      "change",
+      "rename",
+      "x",
+    );
+    expect(native.calls.get(sub)).toBe(1);
+    await w.rescan();
+    expect(native.calls.get(sub)).toBe(2);
   });
 
   test("a native watcher error that keeps coming without an event in between stops being retried", async () => {
@@ -212,7 +229,6 @@ describe("a watch that could not be established", () => {
       await until(() => errors.length === attempt);
       if (attempt <= 3) await until(() => (native.calls.get(sub) ?? 0) === before + 1);
     }
-    await new Promise((r) => setTimeout(r, 200));
     expect(native.calls.get(sub)).toBe(4);
     expect(w.unwatched).toEqual([sub]);
   });

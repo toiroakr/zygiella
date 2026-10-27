@@ -7,12 +7,21 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 const reads = vi.hoisted(() => new Map<string, number>());
 // names whose native events are swallowed, as when the OS drops or coalesces one
 const dropped = vi.hoisted(() => new Set<string>());
+// every path fs.watch was called for, to see which directory serves a path that does not exist yet
+const opened = vi.hoisted(() => [] as string[]);
+// holds the answer of one readdir back until `release` is called, after the directory was already listed
+const gate = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+  hold: undefined as Promise<void> | undefined,
+  reached: false,
+}));
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
     ...actual,
     watch: ((...args: Parameters<typeof actual.watch>) => {
+      opened.push(String(args[0]));
       const watcher = actual.watch(...args);
       const on = watcher.on.bind(watcher);
       watcher.on = ((event: string, listener: (...rest: unknown[]) => void) =>
@@ -35,7 +44,18 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     ...actual,
     readdir: ((path: string, ...rest: unknown[]) => {
       reads.set(String(path), (reads.get(String(path)) ?? 0) + 1);
-      return (actual.readdir as unknown as (...args: unknown[]) => unknown)(path, ...rest);
+      const listed = (actual.readdir as unknown as (...args: unknown[]) => Promise<unknown>)(
+        path,
+        ...rest,
+      );
+      if (gate.hold && String(path) === gate.path) {
+        gate.reached = true;
+        return listed.then(async (names) => {
+          await gate.hold;
+          return names;
+        });
+      }
+      return listed;
     }) as typeof actual.readdir,
   };
 });
@@ -55,10 +75,20 @@ beforeEach(async () => {
   dir = await realpath(await mkdtemp(join(tmpdir(), "zygiella-")));
   big = join(dir, "big");
   await mkdir(big);
-  await Promise.all(Array.from({ length: LARGE }, (_, i) => writeFile(join(big, `f${i}`), "1")));
+  // a few at a time: a host that allows 256 open files would fail with EMFILE if all of them were open at once
+  for (let first = 0; first < LARGE; first += 50)
+    await Promise.all(
+      Array.from({ length: Math.min(50, LARGE - first) }, (_, i) =>
+        writeFile(join(big, `f${first + i}`), "1"),
+      ),
+    );
   watchers = [];
   reads.clear();
   dropped.clear();
+  opened.length = 0;
+  gate.path = undefined;
+  gate.hold = undefined;
+  gate.reached = false;
 });
 
 afterEach(async () => {
@@ -188,6 +218,47 @@ describe("once the events of a directory with many entries have stopped", () => 
     await rm(file);
     await until(() => seen.some(([event]) => event === "unlink"));
     expect(seen).toEqual([["unlink", file]]);
+  });
+});
+
+describe("a full read and a named entry read of the same large directory", () => {
+  test("an entry recorded while the directory was being read is not reported as removed", async () => {
+    const { w, seen } = await start(dir);
+    await quiet();
+    let release!: () => void;
+    gate.path = big;
+    gate.hold = new Promise<void>((done) => (release = done));
+    const scan = w.rescan();
+    await until(() => gate.reached);
+    await writeFile(join(big, "late"), "1");
+    await until(() => seen.some(([event, path]) => event === "add" && path === join(big, "late")));
+    release();
+    await scan;
+    await new Promise((r) => setTimeout(r, 200));
+    expect(seen.filter(([event]) => event === "unlink")).toEqual([]);
+  });
+});
+
+describe("a large directory that other watched paths depend on", () => {
+  test("a file that is itself a watched path is reported as removed when its own event was lost", async () => {
+    const { w, seen } = await start(dir);
+    const file = join(big, "f5");
+    await w.add(file).ready;
+    dropped.add("f5");
+    await rm(file);
+    await writeFile(join(big, "f0"), "22");
+    await until(() => seen.some(([event]) => event === "unlink"), 4000);
+    expect(seen).toContainEqual(["unlink", file]);
+  });
+
+  test("a path below it that did not exist yet is watched from the directory that now exists", async () => {
+    const w = watch([big, join(big, "new", "a.txt")], { ignoreInitial: true, atomic: false });
+    watchers.push(w);
+    await w.ready;
+    await mkdir(join(big, "new"));
+    // the watch on `big` served the missing path until now; the sync of its root is what moves it
+    // sooner than the audit of the directory would
+    await until(() => opened.includes(join(big, "new")), 500);
   });
 });
 

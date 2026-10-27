@@ -290,10 +290,11 @@ await watcher.close();
 - `ready` comes 50 ms after the OS watchers are attached, because `fs.watch` returns before macOS starts
   delivering events and a change made in that gap would be lost.
 - Every event re-reads the directory it came from and compares it with what was seen before. A directory with more
-  than 1000 entries is the exception: its events are trusted for the name they carry, and only that entry is
-  inspected, because reading 30,000 entries (a `readdir` and an `lstat` for each) took 0.2 to 1 s per event on
-  macOS and Linux. The directory is read whole once, 1 s after its last event, so an entry whose event was lost
-  is reported then (or by `rescan()`) and not by the next event.
+  than 1000 entries that are not under `ignored` is the exception: its events are trusted for the name they carry,
+  and only that entry is inspected, because reading 30,000 entries (a `readdir` and an `lstat` for each) took 0.2
+  to 1 s per event on macOS and Linux. The directory is read whole once, 1 s after its last event, so an entry
+  whose event was lost is reported then when other events of that directory arrived (an event that was lost with
+  nothing after it stays missed until the next event or `rescan()`), and not by the next event.
 - On Linux and Windows every directory that is descended into gets its own `fs.watch`, and a directory under
   `ignored`, such as `node_modules`, costs no watches. On Linux each one uses an inotify watch, so a very large tree
   can reach `fs.inotify.max_user_watches`.

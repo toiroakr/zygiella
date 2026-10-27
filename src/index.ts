@@ -110,6 +110,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   const denied = new Set<string>();
   const missingAtStart = new Set<string>();
   const audits = new Map<string, NodeJS.Timeout>();
+  /** For each directory a full read is going through: the paths a named entry read recorded meanwhile. */
+  const scanning = new Map<string, Set<string>>();
   let rescanTimer: NodeJS.Timeout | undefined;
   let closed = false;
   let ready: Promise<ReadyResult>;
@@ -220,6 +222,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   }
 
   async function rescanOnce(): Promise<void> {
+    // a limit that stopped a watch may be gone by now
+    natives.retry();
     await Promise.all(
       [...watchedRoots].map((root) => serial(`root:${root}`, () => syncRoot(root, "live"))),
     );
@@ -433,11 +437,29 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     mode: Mode,
     ancestry: readonly string[],
   ): Promise<void> {
+    // a named entry read that runs while this one lists the directory records entries the list is too early to contain
+    const recorded = new Set<string>();
+    scanning.set(dir, recorded);
+    try {
+      await readDir(dir, left, mode, ancestry, recorded);
+    } finally {
+      scanning.delete(dir);
+    }
+  }
+
+  async function readDir(
+    dir: string,
+    left: number,
+    mode: Mode,
+    ancestry: readonly string[],
+    recorded: ReadonlySet<string>,
+  ): Promise<void> {
     if (closed || ![...watchedRoots].some((root) => within(root, dir))) return;
     // attach the watcher before reading, so nothing that changes during the scan is lost
     depthLeft.set(dir, left);
     ancestries.set(dir, ancestry);
-    if (!natives.covers(dir) || !physical(dir, ancestry)) natives.ensure(dir);
+    if (natives.covers(dir) && physical(dir, ancestry)) natives.covered(dir);
+    else natives.ensure(dir);
     const names = await readdir(dir).catch((error: NodeJS.ErrnoException) => {
       fail(error, dir);
       return undefined;
@@ -452,7 +474,12 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     );
     if (closed) return;
     for (const path of children.get(dir) ?? []) {
-      if (!seen.has(path) && !uninspectable.has(path) && !watchedRoots.has(path))
+      if (
+        !seen.has(path) &&
+        !uninspectable.has(path) &&
+        !recorded.has(path) &&
+        !watchedRoots.has(path)
+      )
         remove(path, true, undefined, mode !== "seed");
     }
     const listed = new Set(names);
@@ -512,7 +539,9 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     const path = join(dir, name);
     const seen = new Set<string>();
     const uninspectable = new Set<string>();
+    scanning.get(dir)?.add(path);
     await syncEntry(dir, name, left, mode, ancestry, seen, uninspectable);
+    scanning.get(dir)?.add(path);
     if (closed || seen.has(path) || uninspectable.has(path) || watchedRoots.has(path)) return;
     if (children.get(dir)?.has(path)) remove(path, true, undefined, mode !== "seed");
   }
@@ -705,19 +734,14 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
 
   const isLarge = (dir: string): boolean => (children.get(dir)?.size ?? 0) > LARGE_DIRECTORY;
 
-  /** Reads `dir` whole once nothing has been reported for it for `AUDIT_QUIET_MS`. */
+  /** Reads `dir` whole once nothing has been reported for it for `AUDIT_QUIET_MS`, as an event without a name would. */
   function audit(dir: string): void {
     clearTimeout(audits.get(dir));
     audits.set(
       dir,
       timeout(() => {
         audits.delete(dir);
-        const left = depthLeft.get(dir);
-        const ancestry = ancestries.get(dir);
-        if (closed) return;
-        if (watchedRoots.has(dir)) void serial(`root:${dir}`, () => syncRoot(dir, "live"));
-        else if (left !== undefined && ancestry)
-          void serial(`dir:${dir}`, () => syncDir(dir, left, "live", ancestry));
+        onNative(dir);
       }, AUDIT_QUIET_MS),
     );
   }
@@ -733,7 +757,9 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       left !== undefined &&
       ancestry &&
       isLarge(dir) &&
-      name !== basename(dir) &&
+      !(watchedRoots.has(dir) && name === basename(dir)) &&
+      // a path that does not exist yet is waited for from its closest directory, and only the sync of its root moves that watch
+      ![...probes.values()].includes(dir) &&
       !watchedRoots.has(join(dir, name))
     ) {
       void serial(`entry:${join(dir, name)}`, () => syncName(dir, name, left, "live", ancestry));
