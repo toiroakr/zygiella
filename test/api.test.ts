@@ -50,3 +50,9 @@ test("ready is a promise and unwatched is a list, as properties", async () => {
 test("FSWatcher is only a type: it is not exported as a value to construct or test with instanceof", () => {
   expect("FSWatcher" in zygiella).toBe(false);
 });
+
+test("ready and unwatched are not enumerable, so spreading or serializing a watcher does not read them", () => {
+  watcher = watch(dir);
+  expect(Object.keys(watcher)).not.toContain("ready");
+  expect(Object.keys(watcher)).not.toContain("unwatched");
+});
