@@ -25,6 +25,7 @@ const native = vi.hoisted(() => ({
   holdFrom: "",
   holdEarly: false,
   fails: [] as Array<{ path: string; code: string }>,
+  hidden: "",
   refreshGate: Promise.resolve(),
   releaseRefresh: () => {},
   holdNext: false,
@@ -60,6 +61,10 @@ const native = vi.hoisted(() => ({
   holdBefore(path: string) {
     native.hold("stat", false, path);
     native.holdEarly = true;
+  },
+  // the listing of a directory leaves this name out, as when what is being deleted is not listed but can still be read
+  hide(name: string) {
+    native.hidden = name;
   },
   // each call makes one more read of `path` fail, in the order of the calls
   failNext(path: string, code = "ENOENT") {
@@ -123,6 +128,13 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       if (!info) throw failure;
       return info;
     }) as typeof actual.stat;
+  const listing = (async (path: string, ...rest: unknown[]) => {
+    const names = await (actual.readdir as (...args: unknown[]) => Promise<string[]>)(
+      path,
+      ...rest,
+    );
+    return native.hidden ? names.filter((name) => name !== native.hidden) : names;
+  }) as typeof actual.readdir;
   const pausing = (async (path: string, ...rest: unknown[]) => {
     const stack = new Error().stack ?? "";
     const refresh = isRefresh(path, stack);
@@ -142,6 +154,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     stat: recording(actual.stat),
     lstat: recording(actual.lstat),
     readlink: pausing,
+    readdir: listing,
   };
 });
 
@@ -167,6 +180,7 @@ beforeEach(async () => {
   native.holdFrom = "";
   native.holdEarly = false;
   native.fails = [];
+  native.hidden = "";
   native.holdNext = false;
   native.rejectHeld = false;
   native.held = false;
@@ -408,6 +422,18 @@ describe("a read of the file that completes after the change was reported", () =
     await w.rescan();
 
     expect(seen).toEqual([]);
+  });
+
+  test("removes a directory that the listing no longer has without looking at it again", async () => {
+    const sub = join(dir, "sub");
+    await mkdir(sub);
+    const { seen } = await watching(dir, sub, { atomic: false });
+
+    native.hide("sub");
+    native.deliver();
+    await until(() => seen.length > 0);
+
+    expect(seen).toEqual([["unlinkDir", sub]]);
   });
 
   test.skipIf(process.platform === "win32")(
