@@ -1660,6 +1660,37 @@ describe("snapshot", () => {
     },
   );
 
+  test("a root below a directory that depth leaves unread keeps its entries", async () => {
+    await mkdir(join(dir, "sub", "deep"), { recursive: true });
+    await writeFile(join(dir, "sub", "deep", "b.txt"), "1");
+    const roots = [dir, join(dir, "sub", "deep")];
+    const snapshot = await stopped(roots);
+    const { w, seen } = await start(roots, { since: snapshot, depth: 0 });
+    await settle();
+    expect(seen).toEqual([]);
+    expect(w.snapshot().entries.map((e) => e.path)).toContain(join(dir, "sub", "deep", "b.txt"));
+  });
+
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "a directory below one that cannot be read keeps its baseline",
+    async () => {
+      await mkdir(join(dir, "locked", "nested"), { recursive: true });
+      await writeFile(join(dir, "locked", "nested", "a.txt"), "1");
+      const snapshot = await stopped(dir);
+      await chmod(join(dir, "locked"), 0o000);
+      try {
+        const { w, seen } = await start(dir, { since: snapshot, ignorePermissionErrors: true });
+        await settle();
+        expect(seen).toEqual([]);
+        expect(w.snapshot().entries.map((e) => e.path)).toContain(
+          join(dir, "locked", "nested", "a.txt"),
+        );
+      } finally {
+        await chmod(join(dir, "locked"), 0o755);
+      }
+    },
+  );
+
   test("a directory is in the snapshot as a directory with the file entries around it", async () => {
     await mkdir(join(dir, "sub"));
     await writeFile(join(dir, "sub", "a.txt"), "12");
