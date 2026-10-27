@@ -285,6 +285,31 @@ describe.skipIf(!recursiveHere)("on macOS", () => {
     ).toEqual([]);
   });
 
+  test("errors of a root that was unwatched do not count against it when it is added again", async () => {
+    // a watched file directly in the root keeps the directory in use, so unwatching the root cannot rely on releasing it
+    const file = join(dir, "a.txt");
+    await writeFile(file, "0");
+    const { w, errors } = await start(dir);
+    await w.add(file).ready;
+    const trees = () => native.calls.filter((call) => call.recursive).length;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const before = trees();
+      native.made
+        .get(`tree:${dir}`)!
+        .emit("error", Object.assign(new Error("lost"), { code: "EIO" }));
+      await until(() => trees() === before + 1);
+    }
+    w.unwatch(dir);
+    await w.add(dir).ready;
+    const before = trees();
+    const count = errors.length;
+    native.made
+      .get(`tree:${dir}`)!
+      .emit("error", Object.assign(new Error("lost"), { code: "EIO" }));
+    await until(() => errors.length > count);
+    await until(() => trees() === before + 1);
+  });
+
   test("a followed link that is a root of its own and whose tree watch failed keeps its own watch", async () => {
     await symlink(outside, join(dir, "link"));
     native.failTreeFor.add(join(dir, "link"));

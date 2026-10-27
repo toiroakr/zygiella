@@ -166,9 +166,9 @@ export function nativeWatches({
     releaseTree(root) {
       trees.get(root)?.close();
       trees.delete(root);
+      rewatches.delete(root);
       blocked.delete(root);
       blockedTrees.delete(root);
-      if (!watchers.has(root)) unwatched.delete(root);
     },
     hasTree: (root) => trees.has(root),
     release(dir) {

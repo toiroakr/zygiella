@@ -219,6 +219,16 @@ describe("a watch that could not be established", () => {
     expect(native.calls.get(sub)).toBe(2);
   });
 
+  test("unwatch() keeps the root listed while a file directly in it, that is a watched path of its own, still depends on it", async () => {
+    await writeFile(join(dir, "a.txt"), "1");
+    native.fail.add(dir);
+    const { w } = await start(dir);
+    await w.add(join(dir, "a.txt")).ready;
+    expect(w.unwatched).toEqual([dir]);
+    w.unwatch(dir);
+    expect(w.unwatched).toEqual([dir]);
+  });
+
   test("a path that an error listener unwatches is not left blocked, so it is watched when it is added again", async () => {
     await mkdir(join(dir, "sub"));
     const { w, errors } = await start(dir);

@@ -230,12 +230,18 @@ describe("a full read and a named entry read of the same large directory", () =>
     gate.path = big;
     gate.hold = new Promise<void>((done) => (release = done));
     const scan = w.rescan();
-    await until(() => gate.reached);
-    await writeFile(join(big, "late"), "1");
-    await until(() => seen.some(([event, path]) => event === "add" && path === join(big, "late")));
-    release();
+    try {
+      await until(() => gate.reached);
+      await writeFile(join(big, "late"), "1");
+      await until(() =>
+        seen.some(([event, path]) => event === "add" && path === join(big, "late")),
+      );
+    } finally {
+      // close() in afterEach waits for the read that is held back
+      release();
+    }
+    // the removal pass of the full read has run when it resolves, and it reports at once without `atomic`
     await scan;
-    await new Promise((r) => setTimeout(r, 200));
     expect(seen.filter(([event]) => event === "unlink")).toEqual([]);
   });
 });
