@@ -37,9 +37,9 @@ const native = vi.hoisted(() => ({
     for (const listener of native.listeners) listener();
   },
   // the next read of the watched file has its result kept back, as when the completion of one `stat` is delivered late
-  holdKind: "stat" as "stat" | "readlink",
+  holdKind: "stat" as "stat" | "readlink" | "realpath",
   // `path` is the file whose read is kept back (the watched one by default), `from` a name in the stack of the call that made it
-  hold(kind: "stat" | "readlink" = "stat", rejecting = false, path = "", from = "") {
+  hold(kind: "stat" | "readlink" | "realpath" = "stat", rejecting = false, path = "", from = "") {
     native.holdNext = true;
     native.holdKind = kind;
     native.holdPath = path;
@@ -70,7 +70,7 @@ const native = vi.hoisted(() => ({
   failNext(path: string, code = "ENOENT") {
     native.fails.push({ path, code });
   },
-  async pause(kind: "stat" | "readlink", path: string, stack: string) {
+  async pause(kind: "stat" | "readlink" | "realpath", path: string, stack: string) {
     if (!native.holdNext || native.holdKind !== kind) return;
     if (path !== (native.holdPath || native.watched) || !stack.includes(native.holdFrom)) return;
     native.holdNext = false;
@@ -128,6 +128,12 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       if (!info) throw failure;
       return info;
     }) as typeof actual.stat;
+  const resolving = (async (path: string, ...rest: unknown[]) => {
+    const stack = new Error().stack ?? "";
+    const real = await (actual.realpath as (...args: unknown[]) => Promise<string>)(path, ...rest);
+    if (!isRefresh(path, stack)) await native.pause("realpath", path, stack);
+    return real;
+  }) as typeof actual.realpath;
   const listing = (async (path: string, ...rest: unknown[]) => {
     const names = await (actual.readdir as (...args: unknown[]) => Promise<string[]>)(
       path,
@@ -155,6 +161,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     lstat: recording(actual.lstat),
     readlink: pausing,
     readdir: listing,
+    realpath: resolving,
   };
 });
 
@@ -435,6 +442,44 @@ describe("a read of the file that completes after the change was reported", () =
 
     expect(seen).toEqual([["unlinkDir", sub]]);
   });
+
+  test.skipIf(process.platform === "win32")(
+    "does not turn a link into a directory when it points to a file again before the read of its target is used",
+    async () => {
+      const link = join(dir, "link");
+      const file1 = join(dir, "file1");
+      const file2 = join(dir, "file2");
+      const sub = join(dir, "sub");
+      const replaceLink = async (target: string) => {
+        await symlink(target, `${link}.tmp`);
+        await rename(`${link}.tmp`, link);
+      };
+      await writeFile(file1, "1");
+      await writeFile(file2, "1");
+      await mkdir(sub);
+      await symlink(file1, link);
+      const { w, seen } = await watching(dir, link, { atomic: false });
+      const readsBefore = native.reads.length;
+
+      native.holdRefresh();
+      await writeFile(file1, "22");
+      native.deliver();
+      await until(
+        () => native.reads.slice(readsBefore).filter((path) => path === link).length >= 2,
+      );
+      native.hold("realpath", false, link);
+      await replaceLink(sub);
+      native.deliver();
+      await until(() => native.held);
+      await replaceLink(file2);
+      native.releaseRefresh();
+      await until(() => seen.length > 0);
+      native.open();
+      await w.rescan();
+
+      expect(seen.filter(([, path]) => path === link)).toEqual([["change", link]]);
+    },
+  );
 
   test.skipIf(process.platform === "win32")(
     "does not report the link target again when the read of it completes after the change was reported",
