@@ -261,7 +261,9 @@ await watcher.close();
 - Nothing above a watched path is watched. A link given to `watch()`, or a link whose target is outside the watched
   tree, is not noticed when the link is replaced or when its target is deleted and created again.
 - A directory or an entry (including the target of a symbolic link) that cannot be read, watched or inspected
-  because of permissions (`EACCES`, `EPERM`) is emitted as `error` once per path, and `ready` still resolves. With `ignorePermissionErrors: true` it is skipped silently. A path that
+  because of permissions (`EACCES`, `EPERM`) is emitted as `error` once per path, and `ready` still resolves. With `ignorePermissionErrors: true` it is skipped silently. A watched path
+  that cannot be inspected for lack of permission is not reported as removed, and what is below it stays as it was
+  until it can be read again. A path that
   disappears while being watched (`ENOENT`, `ENOTDIR`) is skipped silently. Other failures are emitted as
   `error`; without an `error` listener that throws, as with any `EventEmitter`.
 

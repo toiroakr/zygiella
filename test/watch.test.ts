@@ -1624,6 +1624,28 @@ describe("snapshot", () => {
     },
   );
 
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "rescan() does not report the baseline of a root that is still unreadable as unlink",
+    async () => {
+      await mkdir(join(dir, "outer", "x"), { recursive: true });
+      await writeFile(join(dir, "outer", "x", "a.txt"), "1");
+      const snapshot = await stopped(join(dir, "outer", "x"));
+      await chmod(join(dir, "outer"), 0o000);
+      try {
+        const { w, seen } = await start(join(dir, "outer", "x"), {
+          since: snapshot,
+          ignorePermissionErrors: true,
+        });
+        await w.rescan();
+        await settle();
+        expect(seen).toEqual([]);
+        expect(w.snapshot().entries.map((e) => e.path)).toContain(join(dir, "outer", "x", "a.txt"));
+      } finally {
+        await chmod(join(dir, "outer"), 0o755);
+      }
+    },
+  );
+
   test("a directory is in the snapshot as a directory with the file entries around it", async () => {
     await mkdir(join(dir, "sub"));
     await writeFile(join(dir, "sub", "a.txt"), "12");

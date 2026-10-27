@@ -70,7 +70,8 @@ The whole library is `src/index.ts`; the tests are `test/watch.test.ts` and run 
   missing, and a scan that is still reading when `close()` is called adds nothing to the baseline (`#visit` returns once
   closed, also after an `unlink` listener closed it, and so do the removal in `#syncDir` and the loop in `#remove`, which leaves the entries it did not reach). A held unlink keeps
   `job.before` when the file had a change waiting. A root whose `stat` fails for a reason other than
-  ENOENT/ENOTDIR (permission) keeps its seeded baseline in `seed` mode instead of reporting it as removed.
+  ENOENT/ENOTDIR (permission) keeps what is below it in any mode, instead of reporting it as removed, so `rescan()`
+  does not turn a still unreadable root into `unlink` for every seeded entry.
 - With `atomic`, the unlink of a file is held back in `#unlinks` for the window, and an `add` announced for the same
   path in that time becomes a `change`. A removed directory reports what is below it at once, flushing held unlinks
   first. `atomic` also adds the editor temporary file patterns to `ignored`.

@@ -451,8 +451,8 @@ export class FSWatcher extends EventEmitter<Events> {
     if (info && !info.isDirectory()) this.#denied.delete(root);
 
     if (!info) {
-      // what a snapshot says is below a root that cannot be inspected is not known to be gone
-      if (!(mode === "seed" && unreadable)) this.#remove(root, true, undefined, mode !== "seed");
+      // a root that cannot be inspected is not known to be gone, and neither is what is below it
+      if (!unreadable) this.#remove(root, true, undefined, mode !== "seed");
       this.#kinds.set(root, "missing");
       const nearest = async (): Promise<string> => {
         let ancestor = dirname(root);
