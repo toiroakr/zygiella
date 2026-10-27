@@ -77,6 +77,7 @@ await watcher.close();
    // SyntaxError: The requested module 'zygiella' does not provide an export named 'FSWatcher'
 
    // zygiella
+   import { EventEmitter } from "node:events";
    import { watch, type FSWatcher } from "zygiella";
    const watcher: FSWatcher = watch("src", { ignoreInitial: true });
    if (value instanceof EventEmitter) {
