@@ -82,8 +82,10 @@ async function watching(target: string, file: string) {
   return { w, seen };
 }
 
-// a report that is waiting keeps the entry as it was last reported, so the size the snapshot holds says whether one is
-async function sizeAfterLateEvent(w: FSWatcher, file: string): Promise<number | undefined> {
+async function sizeLastReportedAfterLateEvent(
+  w: FSWatcher,
+  file: string,
+): Promise<number | undefined> {
   const reads = native.sizesRead.length;
   native.deliver();
   await until(() => native.sizesRead.length > reads);
@@ -101,7 +103,7 @@ describe("a write whose native event arrives after the quiet period", () => {
     await writeFile(file, "22");
     await until(() => seen.length > 0);
 
-    expect(await sizeAfterLateEvent(w, file)).toBe(2);
+    expect(await sizeLastReportedAfterLateEvent(w, file)).toBe(2);
     expect(seen).toEqual([["add", file]]);
   });
 
@@ -116,7 +118,7 @@ describe("a write whose native event arrives after the quiet period", () => {
     await writeFile(file, "22");
     await until(() => seen.length > 0);
 
-    expect(await sizeAfterLateEvent(w, file)).toBe(2);
+    expect(await sizeLastReportedAfterLateEvent(w, file)).toBe(2);
     expect(seen).toEqual([["change", file]]);
   });
 });
