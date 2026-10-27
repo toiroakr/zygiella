@@ -9,8 +9,20 @@ const native = vi.hoisted(() => ({
   listeners: [] as Array<() => void>,
   sizesRead: [] as number[],
   watched: "",
+  holdNext: false,
+  held: false,
+  gate: Promise.resolve(),
+  open: () => {},
   deliver() {
     for (const listener of native.listeners) listener();
+  },
+  // the next read of the watched file has its result kept back, as when the completion of one `stat` is delivered late
+  hold() {
+    native.holdNext = true;
+    native.held = false;
+    native.gate = new Promise<void>((resolve) => {
+      native.open = resolve;
+    });
   },
 }));
 
@@ -36,7 +48,14 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   const recording = (read: typeof actual.stat): typeof actual.stat =>
     (async (path: string, ...rest: unknown[]) => {
       const info = await (read as (...args: unknown[]) => Promise<{ size: number }>)(path, ...rest);
-      if (path === native.watched) native.sizesRead.push(info.size);
+      if (path === native.watched) {
+        native.sizesRead.push(info.size);
+        if (native.holdNext) {
+          native.holdNext = false;
+          native.held = true;
+          await native.gate;
+        }
+      }
       return info;
     }) as typeof actual.stat;
   return { ...actual, stat: recording(actual.stat), lstat: recording(actual.lstat) };
@@ -57,9 +76,13 @@ beforeEach(async () => {
   native.listeners = [];
   native.sizesRead = [];
   native.watched = "";
+  native.holdNext = false;
+  native.held = false;
+  native.open = () => {};
 });
 
 afterEach(async () => {
+  native.open();
   await Promise.all(watchers.map((w) => w.close()));
   await rm(dir, { recursive: true, force: true });
 });
@@ -119,6 +142,32 @@ describe("a write whose native event arrives after the quiet period", () => {
     await until(() => seen.length > 0);
 
     expect(await sizeLastReportedAfterLateEvent(w, file)).toBe(2);
+    expect(seen).toEqual([["change", file]]);
+  });
+});
+
+describe("a read of the file that completes after the change was reported", () => {
+  test("does not report the write again when it had seen the truncated file", async () => {
+    const file = join(dir, "a.txt");
+    await writeFile(file, "1");
+    native.watched = file;
+    const w = watch(file, { ignoreInitial: true });
+    watchers.push(w);
+    const seen: Array<[string, string]> = [];
+    w.on("all", (event, path) => seen.push([event, path]));
+    await new Promise<void>((r) => w.once("ready", () => r()));
+
+    await truncate(file, 0);
+    native.deliver();
+    await until(() => native.sizesRead.includes(0));
+    native.hold();
+    native.deliver();
+    await until(() => native.held);
+    await writeFile(file, "22");
+    await until(() => seen.length > 0);
+    native.open();
+    await settle();
+
     expect(seen).toEqual([["change", file]]);
   });
 });
