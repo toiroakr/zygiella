@@ -56,7 +56,7 @@ set), `pending.ts` (add / change waiting to settle and unlinks held for `atomic`
   `isLarge` counts tracked entries, so entries under `ignored` do not count. A full read and a named read of one
   directory run in different queues; `scanning` makes the full read keep what a named read recorded meanwhile.
 - A native watcher error is retried by one re-sync of its directory (a read of everything for a tree watch), except `EMFILE` / `ENOSPC` and the fourth error
-  in a row without an event (`native.ts`), after which only `rescan()` lets that path be watched again (`retry`); a re-watch after `EMFILE` on macOS made libuv rebuild its one stream for
+  in a row without an event (`native.ts`), after which only `rescan()` lets that path be watched again (`retry`; releasing it with `unwatch()` forgets it too), and nothing below a root whose tree watch was given up is watched one by one until then (`blockedTrees`); the state is recorded before the `error` event is emitted; a re-watch after `EMFILE` on macOS made libuv rebuild its one stream for
   every handle, and the process never reached `ready`.
 - `Mode` decides whether a diff reports: `quiet` (remember only, for `ignoreInitial`), `initial` (report at
   once, it is what `ready` waits for) and `live` (report after a quiet period, see below).

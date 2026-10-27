@@ -251,6 +251,40 @@ describe.skipIf(!recursiveHere)("on macOS", () => {
     expect(native.calls.filter((call) => call.recursive && call.path === other)).toHaveLength(1);
   });
 
+  test("the recursive watch of a root is closed when the root is unwatched, even if a watched file below it remains", async () => {
+    // directly in the root: the directory of the file is the root itself, which keeps its own watch for the file
+    const file = join(dir, "a.txt");
+    await writeFile(file, "0");
+    const { w } = await start(dir);
+    await w.add(file).ready;
+    w.unwatch(dir);
+    expect(native.closed).toContain(`tree:${dir}`);
+  });
+
+  test("a tree that hit a limit is not watched directory by directory by a scan that something else asked for", async () => {
+    const other = join(dir, "other");
+    const main = join(dir, "main");
+    await mkdir(join(other, "x", "y"), { recursive: true });
+    await mkdir(main);
+    const { seen, errors } = await start([main, other]);
+    native.made
+      .get(`tree:${other}`)!
+      .emit("error", Object.assign(new Error("limit"), { code: "EMFILE" }));
+    await until(() => errors.length > 0);
+    const before = native.calls.length;
+    (native.made.get(`tree:${main}`)! as unknown as { emit: (...args: unknown[]) => boolean }).emit(
+      "change",
+      "rename",
+      null,
+    );
+    await writeUntil(join(main, "a.txt"), () =>
+      seen.some(([, path]) => path === join(main, "a.txt")),
+    );
+    expect(
+      native.calls.slice(before).filter((call) => !call.recursive && call.path.startsWith(other)),
+    ).toEqual([]);
+  });
+
   test("a followed link that is a root of its own and whose tree watch failed keeps its own watch", async () => {
     await symlink(outside, join(dir, "link"));
     native.failTreeFor.add(join(dir, "link"));

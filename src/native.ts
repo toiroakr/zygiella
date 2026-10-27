@@ -1,6 +1,7 @@
 import { watch as nativeWatch, type FSWatcher as NativeWatcher } from "node:fs";
 import { stat } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { within } from "./match.ts";
 
 export const VANISHED = new Set(["ENOENT", "ENOTDIR"]);
 export const DENIED = new Set(["EACCES", "EPERM"]);
@@ -42,6 +43,8 @@ export interface NativeWatches {
   covered(dir: string, keep: boolean): void;
   /** Lets `ensure` and `ensureTree` try again where a limit was hit; only `rescan()` does this. */
   retry(): void;
+  /** Closes the tree watch of `root`, which is no longer a watched root, whatever else still needs its directory. */
+  releaseTree(root: string): void;
   release(dir: string): void;
   /** Directories (or tree roots) that are read but have no native watch, sorted. */
   unwatched(): string[];
@@ -72,6 +75,8 @@ export function nativeWatches({
   const rewatches = new Map<string, number>();
   // keys whose watch was given up on: only rescan() asks for another try, not a read that happens to pass by
   const blocked = new Set<string>();
+  // roots whose tree watch was given up on: nothing below them is watched one by one until rescan() either
+  const blockedTrees = new Set<string>();
   let treesUnavailable = false;
   let closed = false;
 
@@ -91,23 +96,24 @@ export function nativeWatches({
   ): void => {
     open.delete(key);
     watcher.close();
-    failed(key, error);
     // a vanished directory is reported by its parent's or the root's own sync; any other error is retried by that
     // sync too, which watches the directory again
     const tries = rewatches.get(key) ?? 0;
-    if (!VANISHED.has(error.code ?? "")) {
-      if (EXHAUSTED.has(error.code ?? "") || tries >= MAX_REWATCHES) {
-        blocked.add(key);
-        return;
-      }
-      rewatches.set(key, tries + 1);
-    }
-    reconcile();
+    const vanished = VANISHED.has(error.code ?? "");
+    const gaveUp = !vanished && (EXHAUSTED.has(error.code ?? "") || tries >= MAX_REWATCHES);
+    // recorded before the error is emitted: a listener that calls rescan() or unwatch() then acts on the new state
+    if (gaveUp) {
+      blocked.add(key);
+      if (open === trees) blockedTrees.add(key);
+    } else if (!vanished) rewatches.set(key, tries + 1);
+    failed(key, error);
+    if (!gaveUp) reconcile();
   };
 
   return {
     ensure(dir) {
       if (closed || watchers.has(dir) || blocked.has(dir)) return;
+      for (const root of blockedTrees) if (within(root, dir)) return;
       try {
         const watcher = nativeWatch(dir, { persistent });
         watcher.on("change", (_type, name) => {
@@ -153,13 +159,24 @@ export function nativeWatches({
       watchers.get(dir)?.close();
       watchers.delete(dir);
     },
-    retry: () => blocked.clear(),
+    retry() {
+      blocked.clear();
+      blockedTrees.clear();
+    },
+    releaseTree(root) {
+      trees.get(root)?.close();
+      trees.delete(root);
+      blocked.delete(root);
+      blockedTrees.delete(root);
+      if (!watchers.has(root)) unwatched.delete(root);
+    },
     hasTree: (root) => trees.has(root),
     release(dir) {
       if (needed(dir)) return;
       unwatched.delete(dir);
       rewatches.delete(dir);
       blocked.delete(dir);
+      blockedTrees.delete(dir);
       watchers.get(dir)?.close();
       watchers.delete(dir);
       trees.get(dir)?.close();
@@ -174,6 +191,7 @@ export function nativeWatches({
       unwatched.clear();
       rewatches.clear();
       blocked.clear();
+      blockedTrees.clear();
     },
   };
 }

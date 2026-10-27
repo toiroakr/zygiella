@@ -219,6 +219,17 @@ describe("a watch that could not be established", () => {
     expect(native.calls.get(sub)).toBe(2);
   });
 
+  test("a path that an error listener unwatches is not left blocked, so it is watched when it is added again", async () => {
+    await mkdir(join(dir, "sub"));
+    const { w, errors } = await start(dir);
+    const sub = join(dir, "sub");
+    w.on("error", () => w.unwatch(dir));
+    native.made.get(sub)!.emit("error", Object.assign(new Error("limit"), { code: "EMFILE" }));
+    await until(() => errors.length > 0);
+    await w.add(dir).ready;
+    expect(native.calls.get(sub)).toBe(2);
+  });
+
   test("a native watcher error that keeps coming without an event in between stops being retried", async () => {
     await mkdir(join(dir, "sub"));
     const { w, errors } = await start(dir);

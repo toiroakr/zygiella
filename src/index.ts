@@ -204,6 +204,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     missingAtStart.delete(path);
     for (const key of denied) if (within(path, key)) denied.delete(key);
     kinds.delete(path);
+    natives.releaseTree(path);
     const probe = probes.get(path);
     probes.delete(path);
     remove(path, false, (key) => ![...watchedRoots].some((root) => within(root, key)));
