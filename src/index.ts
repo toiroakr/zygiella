@@ -2,8 +2,8 @@ import { EventEmitter } from "node:events";
 import type { Stats } from "node:fs";
 import { lstat, readdir, readlink, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
-import { pendingEvents, type Pending } from "./pending.ts";
-import { DENIED, VANISHED, nativeWatches, type NativeWatches } from "./native.ts";
+import { pendingEvents } from "./pending.ts";
+import { DENIED, VANISHED, nativeWatches } from "./native.ts";
 import { recorded, seedEntries, toSnapshot } from "./snapshot.ts";
 import { EDITOR_TEMP, list, matcher, within, type Matcher } from "./match.ts";
 import type {
@@ -36,187 +36,177 @@ const MAX_TIMER_MS = 2 ** 31 - 1;
  */
 type Mode = "quiet" | "initial" | "seed" | "live";
 
-export class FSWatcher extends EventEmitter<Events> {
-  readonly #ignored: Matcher;
-  readonly #atomic: number;
-  readonly #ignoreInitial: boolean;
-  readonly #depth: number;
-  readonly #followSymlinks: boolean;
-  readonly #ignorePermissionErrors: boolean;
-  readonly #persistent: boolean;
-  readonly #rescanInterval: number;
-
-  readonly #roots = new Set<string>();
-  readonly #kinds = new Map<string, "dir" | "file" | "missing">();
-  readonly #probes = new Map<string, string>();
-  readonly #entries = new Map<string, Entry>();
-  readonly #children = new Map<string, Set<string>>();
-  readonly #depthLeft = new Map<string, number>();
-  /** Real paths of the directories from the watched root down to each directory, the directory's own last. */
-  readonly #ancestry = new Map<string, readonly string[]>();
-  readonly #queues = new Map<string, { dirty: boolean; done: Promise<void> }>();
-  readonly #denied = new Set<string>();
-  readonly #natives: NativeWatches;
-  readonly #pending: Pending;
-  readonly #missingAtStart = new Set<string>();
-  #rescanTimer: NodeJS.Timeout | undefined;
-  #closed = false;
-
-  #ready: Promise<ReadyResult>;
-
+/**
+ * What `watch()` returns: an `EventEmitter` with the events of `WatchEvent`, `all`, `ready` and `error`.
+ */
+export interface FSWatcher extends EventEmitter<Events> {
   /**
    * Resolves once the paths last given to `watch()` or `add()` are being watched, so a change made right after it
    * is reported. It resolves to the paths of that call that did not exist. The `ready` event is emitted for the
    * paths given to `watch()` only.
    */
-  get ready(): Promise<ReadyResult> {
-    return this.#ready;
-  }
-
+  readonly ready: Promise<ReadyResult>;
   /**
    * Directories that are read but have no native watch, because `fs.watch` threw (`ENOSPC`, `EMFILE`) or the
    * watcher reported an error. Changes below them are missed until `rescan()` reads them, and it also tries to
    * watch them again.
    */
-  get unwatched(): readonly string[] {
-    return this.#natives.unwatched();
-  }
+  readonly unwatched: readonly string[];
+  /**
+   * The state to start the next run from (`since`): what has been reported so far. A file whose `add` is still
+   * waiting is left out, so the next run reports it; a `change` that is waiting, or an `unlink` held back for
+   * `atomic`, is recorded as it was before, so the next run reports that too.
+   */
+  snapshot(): Snapshot;
+  add(paths: string | readonly string[]): this;
+  unwatch(paths: string | readonly string[]): this;
+  /**
+   * Reads every watched root and every directory descended into again, and reports what differs from the last
+   * time. Resolves once that is read; add / change are reported after their usual wait.
+   */
+  rescan(): Promise<void>;
+  close(): Promise<void>;
+}
 
-  constructor(paths: string | readonly string[], options: WatchOptions = {}) {
-    super();
-    const atomic = options.atomic ?? true;
-    this.#atomic = atomic === true ? ATOMIC_MS : atomic || 0;
-    const userIgnored = matcher(options.ignored);
-    this.#ignored =
-      this.#atomic > 0
-        ? { ...userIgnored, byPath: (path) => EDITOR_TEMP.test(path) || userIgnored.byPath(path) }
-        : userIgnored;
-    this.#ignoreInitial = options.ignoreInitial ?? false;
-    this.#depth = options.depth ?? Infinity;
-    this.#followSymlinks = options.followSymlinks ?? true;
-    this.#ignorePermissionErrors = options.ignorePermissionErrors ?? false;
-    this.#persistent = options.persistent ?? true;
-    this.#natives = nativeWatches({
-      persistent: this.#persistent,
-      needed: (dir) => this.#needed(dir),
-      onChange: (dir) => this.#onNative(dir),
-      onError: (error, dir) => this.#fail(error, dir),
-    });
-    const rescanInterval = options.rescanInterval ?? 0;
-    // `false` and `""` would pass the range test by coercion, and setTimeout reads them as 1 ms
-    if (
-      typeof rescanInterval !== "number" ||
-      !(rescanInterval >= 0 && rescanInterval <= MAX_TIMER_MS)
-    )
-      throw new RangeError(
-        `rescanInterval must be a number from 0 to ${MAX_TIMER_MS} ms, got ${String(rescanInterval)}`,
-      );
-    this.#rescanInterval = rescanInterval;
-    const awf = options.awaitWriteFinish;
-    this.#pending = pendingEvents({
-      atomic: this.#atomic,
-      settle: awf
-        ? {
-            stabilityThreshold: (typeof awf === "object" && awf.stabilityThreshold) || 2000,
-            pollInterval: (typeof awf === "object" && awf.pollInterval) || 100,
-          }
-        : undefined,
-      followSymlinks: this.#followSymlinks,
-      timeout: (fn, ms) => this.#timeout(fn, ms),
-      dispatch: (event, path) => this.#dispatch(event, path),
-      stat: (path) => this.#stat(path),
-      settled: (path, info, link) => {
-        // the file may have been written again since the entry was read, with no native event to read it again
-        const entry = this.#entries.get(path);
-        if (entry && !entry.dir)
-          this.#entries.set(path, {
-            ...entry,
-            mtimeMs: info.mtimeMs,
-            size: info.size,
-            ino: info.ino,
-            link: info.isSymbolicLink() ? (link ?? entry.link) : undefined,
-          });
-      },
-    });
-    const roots = list(paths);
-    this.#seed(options.since, roots);
-    this.#ready = this.#watch(roots, options.since !== undefined).then((result) => {
-      if (!this.#closed) this.emit("ready", result);
-      this.#scheduleRescan();
-      return result;
-    });
-  }
+export function watch(paths: string | readonly string[], options: WatchOptions = {}): FSWatcher {
+  const emitter = new EventEmitter<Events>();
+  const atomic = options.atomic ?? true;
+  const atomicMs = atomic === true ? ATOMIC_MS : atomic || 0;
+  const userIgnored = matcher(options.ignored);
+  const ignored: Matcher =
+    atomicMs > 0
+      ? { ...userIgnored, byPath: (path) => EDITOR_TEMP.test(path) || userIgnored.byPath(path) }
+      : userIgnored;
+  const ignoreInitial = options.ignoreInitial ?? false;
+  const maxDepth = options.depth ?? Infinity;
+  const followSymlinks = options.followSymlinks ?? true;
+  const ignorePermissionErrors = options.ignorePermissionErrors ?? false;
+  const persistent = options.persistent ?? true;
+  const rescanInterval = options.rescanInterval ?? 0;
+  // `false` and `""` would pass the range test by coercion, and setTimeout reads them as 1 ms
+  if (
+    typeof rescanInterval !== "number" ||
+    !(rescanInterval >= 0 && rescanInterval <= MAX_TIMER_MS)
+  )
+    throw new RangeError(
+      `rescanInterval must be a number from 0 to ${MAX_TIMER_MS} ms, got ${String(rescanInterval)}`,
+    );
+
+  const watchedRoots = new Set<string>();
+  const kinds = new Map<string, "dir" | "file" | "missing">();
+  const probes = new Map<string, string>();
+  const entries = new Map<string, Entry>();
+  const children = new Map<string, Set<string>>();
+  const depthLeft = new Map<string, number>();
+  /** Real paths of the directories from the watched root down to each directory, the directory's own last. */
+  const ancestries = new Map<string, readonly string[]>();
+  const queues = new Map<string, { dirty: boolean; done: Promise<void> }>();
+  const denied = new Set<string>();
+  const missingAtStart = new Set<string>();
+  let rescanTimer: NodeJS.Timeout | undefined;
+  let closed = false;
+  let ready: Promise<ReadyResult>;
+
+  const natives = nativeWatches({
+    persistent,
+    needed: (dir) => needed(dir),
+    onChange: (dir) => onNative(dir),
+    onError: (error, dir) => fail(error, dir),
+  });
+  const awf = options.awaitWriteFinish;
+  const pending = pendingEvents({
+    atomic: atomicMs,
+    settle: awf
+      ? {
+          stabilityThreshold: (typeof awf === "object" && awf.stabilityThreshold) || 2000,
+          pollInterval: (typeof awf === "object" && awf.pollInterval) || 100,
+        }
+      : undefined,
+    followSymlinks,
+    timeout: (fn, ms) => timeout(fn, ms),
+    dispatch: (event, path) => dispatch(event, path),
+    stat: (path) => followStat(path),
+    settled: (path, info, link) => {
+      // the file may have been written again since the entry was read, with no native event to read it again
+      const entry = entries.get(path);
+      if (entry && !entry.dir)
+        entries.set(path, {
+          ...entry,
+          mtimeMs: info.mtimeMs,
+          size: info.size,
+          ino: info.ino,
+          link: info.isSymbolicLink() ? (link ?? entry.link) : undefined,
+        });
+    },
+  });
 
   /**
    * The state to start the next run from (`since`): what has been reported so far. A file whose `add` is still
    * waiting is left out, so the next run reports it; a `change` that is waiting, or an `unlink` held back for
    * `atomic`, is recorded as it was before, so the next run reports that too.
    */
-  snapshot(): Snapshot {
-    const entries: SnapshotEntry[] = [];
-    for (const [path, current] of this.#entries) {
-      const before = this.#pending.baseline(path, current);
-      if (before) entries.push(recorded(path, before));
+  function snapshot(): Snapshot {
+    const recordedEntries: SnapshotEntry[] = [];
+    for (const [path, current] of entries) {
+      const before = pending.baseline(path, current);
+      if (before) recordedEntries.push(recorded(path, before));
     }
-    for (const [path, entry] of this.#pending.heldEntries()) entries.push(recorded(path, entry));
-    return toSnapshot(entries);
+    for (const [path, entry] of pending.heldEntries()) recordedEntries.push(recorded(path, entry));
+    return toSnapshot(recordedEntries);
   }
 
   /** Remembers what `since` holds for the watched roots, so the first scan reports only the difference. */
-  #seed(since: Snapshot | null | undefined, roots: string[]): void {
+  function seed(since: Snapshot | null | undefined, roots: string[]): void {
     for (const { path, dir, mtimeMs, size, ino, link } of seedEntries(
       since,
       roots,
-      this.#depth,
-      this.#ignored.byPath,
+      maxDepth,
+      ignored.byPath,
     ))
-      this.#setEntry(path, { dir, mtimeMs, size, ino, link });
+      setEntry(path, { dir, mtimeMs, size, ino, link });
   }
 
-  add(paths: string | readonly string[]): this {
-    this.#ready = this.#watch(list(paths));
-    return this;
+  function add(paths: string | readonly string[]): FSWatcher {
+    ready = begin(list(paths));
+    return watcher;
   }
 
-  unwatch(paths: string | readonly string[]): this {
+  function unwatch(paths: string | readonly string[]): FSWatcher {
     for (const path of list(paths)) {
-      this.#roots.delete(path);
-      this.#missingAtStart.delete(path);
-      for (const key of this.#denied) if (within(path, key)) this.#denied.delete(key);
-      this.#kinds.delete(path);
-      const probe = this.#probes.get(path);
-      this.#probes.delete(path);
-      this.#remove(path, false, (key) => ![...this.#roots].some((root) => within(root, key)));
-      if (probe) this.#natives.release(probe);
-      // a directory whose watch failed has no entry, so #remove never released it
-      for (const key of this.#natives.unwatched())
-        if (within(path, key)) this.#natives.release(key);
+      watchedRoots.delete(path);
+      missingAtStart.delete(path);
+      for (const key of denied) if (within(path, key)) denied.delete(key);
+      kinds.delete(path);
+      const probe = probes.get(path);
+      probes.delete(path);
+      remove(path, false, (key) => ![...watchedRoots].some((root) => within(root, key)));
+      if (probe) natives.release(probe);
+      // a directory whose watch failed has no entry, so remove never released it
+      for (const key of natives.unwatched()) if (within(path, key)) natives.release(key);
       const parent = dirname(path);
-      if (parent !== path) this.#natives.release(parent);
+      if (parent !== path) natives.release(parent);
     }
-    return this;
+    return watcher;
   }
 
   /**
    * Reads every watched root and every directory descended into again, and reports what differs from the last
    * time. Resolves once that is read; add / change are reported after their usual wait.
    */
-  async rescan(): Promise<void> {
-    if (this.#closed) return;
+  async function rescan(): Promise<void> {
+    if (closed) return;
     // a call made while a rescan runs makes it run once more afterwards, so two rescans never read at the same time
-    await this.#serial("rescan", () => this.#rescanOnce());
+    await serial("rescan", () => rescanOnce());
   }
 
-  async #rescanOnce(): Promise<void> {
+  async function rescanOnce(): Promise<void> {
     await Promise.all(
-      [...this.#roots].map((root) =>
-        this.#serial(`root:${root}`, () => this.#syncRoot(root, "live")),
-      ),
+      [...watchedRoots].map((root) => serial(`root:${root}`, () => syncRoot(root, "live"))),
     );
     // a read can drop a directory or change what lies below it, so shallow directories go first and each one is
     // looked up again when its turn comes
     const levels = new Map<number, string[]>();
-    for (const dir of this.#depthLeft.keys()) {
+    for (const dir of depthLeft.keys()) {
       const depth = dir.split(sep).length;
       const level = levels.get(depth);
       if (level) level.push(dir);
@@ -225,100 +215,100 @@ export class FSWatcher extends EventEmitter<Events> {
     for (const depth of [...levels.keys()].sort((a, b) => a - b)) {
       await Promise.all(
         levels.get(depth)!.map((dir) => {
-          const left = this.#depthLeft.get(dir);
-          const ancestry = this.#ancestry.get(dir);
-          return left !== undefined && ancestry && !this.#roots.has(dir)
-            ? this.#serial(`dir:${dir}`, () => this.#syncDir(dir, left, "live", ancestry))
+          const left = depthLeft.get(dir);
+          const ancestry = ancestries.get(dir);
+          return left !== undefined && ancestry && !watchedRoots.has(dir)
+            ? serial(`dir:${dir}`, () => syncDir(dir, left, "live", ancestry))
             : undefined;
         }),
       );
     }
   }
 
-  async close(): Promise<void> {
-    this.#closed = true;
-    clearTimeout(this.#rescanTimer);
-    this.#pending.close(this.#entries);
-    this.#natives.close();
-    await Promise.all([...this.#queues.values()].map((q) => q.done));
+  async function close(): Promise<void> {
+    closed = true;
+    clearTimeout(rescanTimer);
+    pending.close(entries);
+    natives.close();
+    await Promise.all([...queues.values()].map((q) => q.done));
   }
 
-  #scheduleRescan(): void {
-    if (this.#closed || this.#rescanInterval === 0) return;
-    this.#rescanTimer = this.#timeout(() => {
-      void this.rescan().finally(() => this.#scheduleRescan());
-    }, this.#rescanInterval);
+  function scheduleRescan(): void {
+    if (closed || rescanInterval === 0) return;
+    rescanTimer = timeout(() => {
+      void watcher.rescan().finally(() => scheduleRescan());
+    }, rescanInterval);
   }
 
-  #timeout(fn: () => void, ms: number): NodeJS.Timeout {
+  function timeout(fn: () => void, ms: number): NodeJS.Timeout {
     const timer = setTimeout(fn, ms);
-    if (!this.#persistent) timer.unref();
+    if (!persistent) timer.unref();
     return timer;
   }
 
-  async #watch(roots: string[], since = false): Promise<ReadyResult> {
-    await this.#start(roots, since ? "seed" : this.#ignoreInitial ? "quiet" : "initial");
-    const missing = [...new Set(roots)].filter((root) => this.#missingAtStart.has(root));
+  async function begin(roots: string[], since = false): Promise<ReadyResult> {
+    await start(roots, since ? "seed" : ignoreInitial ? "quiet" : "initial");
+    const missing = [...new Set(roots)].filter((root) => missingAtStart.has(root));
     // not unref'd: a caller awaiting `ready` would otherwise see the process exit before it resolves (exit code 13)
     // fs.watch returns before the OS starts delivering (FSEvents on macOS): a change made in that gap is never reported
     await new Promise<void>((done) => setTimeout(done, READY_SETTLE_MS));
     return { missing };
   }
 
-  #start(roots: string[], mode: Mode): Promise<void> {
-    for (const root of roots) this.#roots.add(root);
+  function start(roots: string[], mode: Mode): Promise<void> {
+    for (const root of roots) watchedRoots.add(root);
     return Promise.all(
-      roots.map((root) => this.#serial(`root:${root}`, () => this.#syncRoot(root, mode))),
+      roots.map((root) => serial(`root:${root}`, () => syncRoot(root, mode))),
     ).then(() => undefined);
   }
 
   /** Runs `fn` for `key` one at a time; a request made while it runs makes it run once more afterwards. */
-  #serial(key: string, fn: () => Promise<void>): Promise<void> {
-    const running = this.#queues.get(key);
+  function serial(key: string, fn: () => Promise<void>): Promise<void> {
+    const running = queues.get(key);
     if (running) {
       running.dirty = true;
       return running.done;
     }
     const queue = { dirty: false, done: Promise.resolve() };
-    this.#queues.set(key, queue);
+    queues.set(key, queue);
     queue.done = (async () => {
       try {
         do {
           queue.dirty = false;
-          await fn().catch((error: NodeJS.ErrnoException) => this.#fail(error, key));
-        } while (queue.dirty && !this.#closed);
+          await fn().catch((error: NodeJS.ErrnoException) => fail(error, key));
+        } while (queue.dirty && !closed);
       } finally {
-        this.#queues.delete(key);
+        queues.delete(key);
       }
     })();
     return queue.done;
   }
 
-  async #syncRoot(root: string, mode: Mode): Promise<void> {
-    if (this.#closed || !this.#roots.has(root)) return;
-    if (this.#ignored.byPath(root)) return;
-    const previousProbe = this.#probes.get(root);
-    const previousParent = this.#kinds.get(root) === "file" ? dirname(root) : undefined;
-    if (mode !== "live") this.#missingAtStart.delete(root);
+  async function syncRoot(root: string, mode: Mode): Promise<void> {
+    if (closed || !watchedRoots.has(root)) return;
+    if (ignored.byPath(root)) return;
+    const previousProbe = probes.get(root);
+    const previousParent = kinds.get(root) === "file" ? dirname(root) : undefined;
+    if (mode !== "live") missingAtStart.delete(root);
     let unreadable = false;
-    let info = await this.#stat(root).catch((error: NodeJS.ErrnoException) => {
-      this.#fail(error, root);
+    let info = await followStat(root).catch((error: NodeJS.ErrnoException) => {
+      fail(error, root);
       unreadable = !VANISHED.has(error.code ?? "");
-      if (mode !== "live" && VANISHED.has(error.code ?? "")) this.#missingAtStart.add(root);
+      if (mode !== "live" && VANISHED.has(error.code ?? "")) missingAtStart.add(root);
       return undefined;
     });
     let link: string | undefined;
-    if (!this.#followSymlinks && info?.isSymbolicLink()) {
+    if (!followSymlinks && info?.isSymbolicLink()) {
       link = await readlink(root).catch(() => undefined);
       if (link === undefined) info = undefined;
     }
-    if (this.#closed || !this.#roots.has(root)) return;
-    if (info && !info.isDirectory()) this.#denied.delete(root);
+    if (closed || !watchedRoots.has(root)) return;
+    if (info && !info.isDirectory()) denied.delete(root);
 
     if (!info) {
       // a root that cannot be inspected is not known to be gone, and neither is what is below it
-      if (!unreadable) this.#remove(root, true, undefined, mode !== "seed");
-      this.#kinds.set(root, "missing");
+      if (!unreadable) remove(root, true, undefined, mode !== "seed");
+      kinds.set(root, "missing");
       const nearest = async (): Promise<string> => {
         let ancestor = dirname(root);
         while (
@@ -332,8 +322,8 @@ export class FSWatcher extends EventEmitter<Events> {
       let ancestor = await nearest();
       const attached = new Set<string>();
       for (;;) {
-        this.#probes.set(root, ancestor);
-        this.#natives.ensure(ancestor);
+        probes.set(root, ancestor);
+        natives.ensure(ancestor);
         attached.add(ancestor);
         const again = await nearest();
         if (again === ancestor) break;
@@ -341,44 +331,44 @@ export class FSWatcher extends EventEmitter<Events> {
       }
       if (previousProbe) attached.add(previousProbe);
       attached.delete(ancestor);
-      for (const stale of attached) this.#natives.release(stale);
-      if (previousParent) this.#natives.release(previousParent);
+      for (const stale of attached) natives.release(stale);
+      if (previousParent) natives.release(previousParent);
       // the root may have been created between the stat above and the watch being attached
       if (
-        await this.#stat(root).then(
+        await followStat(root).then(
           () => true,
           () => false,
         )
       )
-        await this.#syncRoot(root, "live");
+        await syncRoot(root, "live");
       return;
     }
 
-    if (!this.#entries.has(root) && this.#ignored.byStats?.(root, info)) {
+    if (!entries.has(root) && ignored.byStats?.(root, info)) {
       // watched all the same, so that the path is read again when its stats may have changed
-      this.#kinds.set(root, info.isDirectory() ? "dir" : "file");
+      kinds.set(root, info.isDirectory() ? "dir" : "file");
       // a directory has no entry to keep its watch while it is skipped, so the probe does, and unwatch() releases it
-      if (info.isDirectory()) this.#probes.set(root, root);
-      else this.#probes.delete(root);
-      this.#natives.ensure(info.isDirectory() ? root : dirname(root));
-      if (previousProbe) this.#natives.release(previousProbe);
-      if (previousParent) this.#natives.release(previousParent);
+      if (info.isDirectory()) probes.set(root, root);
+      else probes.delete(root);
+      natives.ensure(info.isDirectory() ? root : dirname(root));
+      if (previousProbe) natives.release(previousProbe);
+      if (previousParent) natives.release(previousParent);
       return;
     }
-    this.#probes.delete(root);
+    probes.delete(root);
     if (info.isDirectory()) {
-      this.#kinds.set(root, "dir");
-      this.#natives.ensure(root);
+      kinds.set(root, "dir");
+      natives.ensure(root);
       const real = await realpath(root).catch(() => root);
-      await this.#visit(root, info, 0, mode, [], real);
-      await this.#syncDir(root, this.#depth, mode, [real]);
+      await visit(root, info, 0, mode, [], real);
+      await syncDir(root, maxDepth, mode, [real]);
     } else {
-      this.#kinds.set(root, "file");
-      this.#natives.ensure(dirname(root));
-      await this.#visit(root, info, 0, mode, [], link);
+      kinds.set(root, "file");
+      natives.ensure(dirname(root));
+      await visit(root, info, 0, mode, [], link);
     }
-    if (previousProbe) this.#natives.release(previousProbe);
-    if (previousParent) this.#natives.release(previousParent);
+    if (previousProbe) natives.release(previousProbe);
+    if (previousParent) natives.release(previousParent);
   }
 
   /**
@@ -386,52 +376,52 @@ export class FSWatcher extends EventEmitter<Events> {
    * it, so it would stay in the baseline after the file is gone. What a watched root at or below that path covers is
    * scanned through that root and keeps its entries, and so do the directories between that path and the root.
    */
-  #forgetBelow(path: string): void {
-    if (!this.#children.get(path)?.size) return;
-    this.#remove(
+  function forgetBelow(path: string): void {
+    if (!children.get(path)?.size) return;
+    remove(
       path,
       false,
       (key) =>
         key !== path &&
-        ![...this.#roots].some(
+        ![...watchedRoots].some(
           (root) => within(path, root) && (within(root, key) || within(key, root)),
         ),
     );
   }
 
-  #stat(path: string): Promise<Stats> {
-    return this.#followSymlinks ? stat(path) : lstat(path);
+  function followStat(path: string): Promise<Stats> {
+    return followSymlinks ? stat(path) : lstat(path);
   }
 
-  async #syncDir(
+  async function syncDir(
     dir: string,
     left: number,
     mode: Mode,
     ancestry: readonly string[],
   ): Promise<void> {
-    if (this.#closed || ![...this.#roots].some((root) => within(root, dir))) return;
+    if (closed || ![...watchedRoots].some((root) => within(root, dir))) return;
     // attach the watcher before reading, so nothing that changes during the scan is lost
-    this.#depthLeft.set(dir, left);
-    this.#ancestry.set(dir, ancestry);
-    this.#natives.ensure(dir);
+    depthLeft.set(dir, left);
+    ancestries.set(dir, ancestry);
+    natives.ensure(dir);
     const names = await readdir(dir).catch((error: NodeJS.ErrnoException) => {
-      this.#fail(error, dir);
+      fail(error, dir);
       return undefined;
     });
-    if (!names || this.#closed) return;
-    this.#denied.delete(dir);
+    if (!names || closed) return;
+    denied.delete(dir);
 
     const seen = new Set<string>();
     const uninspectable = new Set<string>();
     const inspectFailed = (error: NodeJS.ErrnoException, path: string): undefined => {
-      this.#fail(error, path);
+      fail(error, path);
       if (!VANISHED.has(error.code ?? "")) uninspectable.add(path);
       return undefined;
     };
     await Promise.all(
       names.map(async (name) => {
         const path = join(dir, name);
-        if (this.#ignored.byPath(path)) return;
+        if (ignored.byPath(path)) return;
         const own = await lstat(path).catch((error) => inspectFailed(error, path));
         if (!own) return;
         let info = own;
@@ -439,7 +429,7 @@ export class FSWatcher extends EventEmitter<Events> {
         let link: string | undefined;
         let descend = left;
         if (own.isSymbolicLink()) {
-          if (this.#followSymlinks) {
+          if (followSymlinks) {
             const target = await stat(path).catch((error) => inspectFailed(error, path));
             if (!target) return;
             info = target;
@@ -450,9 +440,8 @@ export class FSWatcher extends EventEmitter<Events> {
               // a link to a directory already on the way down would loop forever
               if (ancestry.includes(real)) {
                 descend = 0;
-                // a link that points somewhere else than before is reported by #visit, with what was below it
-                if (mode === "seed" && this.#entries.get(path)?.link === real)
-                  this.#forgetBelow(path);
+                // a link that points somewhere else than before is reported by `visit`, with what was below it
+                if (mode === "seed" && entries.get(path)?.link === real) forgetBelow(path);
               }
             }
           } else {
@@ -460,10 +449,10 @@ export class FSWatcher extends EventEmitter<Events> {
             if (link === undefined) return;
           }
         }
-        if (own.isSymbolicLink() || !info.isDirectory()) this.#denied.delete(path);
-        if (!this.#entries.has(path) && this.#ignored.byStats?.(path, info)) return;
+        if (own.isSymbolicLink() || !info.isDirectory()) denied.delete(path);
+        if (!entries.has(path) && ignored.byStats?.(path, info)) return;
         seen.add(path);
-        await this.#visit(
+        await visit(
           path,
           info,
           descend,
@@ -473,18 +462,18 @@ export class FSWatcher extends EventEmitter<Events> {
         );
       }),
     );
-    if (this.#closed) return;
-    for (const path of this.#children.get(dir) ?? []) {
-      if (!seen.has(path) && !uninspectable.has(path) && !this.#roots.has(path))
-        this.#remove(path, true, undefined, mode !== "seed");
+    if (closed) return;
+    for (const path of children.get(dir) ?? []) {
+      if (!seen.has(path) && !uninspectable.has(path) && !watchedRoots.has(path))
+        remove(path, true, undefined, mode !== "seed");
     }
     const listed = new Set(names);
-    for (const path of this.#denied) {
-      if (dirname(path) === dir && !listed.has(basename(path))) this.#denied.delete(path);
+    for (const path of denied) {
+      if (dirname(path) === dir && !listed.has(basename(path))) denied.delete(path);
     }
   }
 
-  async #visit(
+  async function visit(
     path: string,
     info: Stats,
     left: number,
@@ -493,7 +482,7 @@ export class FSWatcher extends EventEmitter<Events> {
     link?: string,
   ): Promise<void> {
     // a scan that was reading when close() was called must not add what was never reported to the baseline
-    if (this.#closed) return;
+    if (closed) return;
     const next: Entry = {
       dir: info.isDirectory(),
       mtimeMs: info.mtimeMs,
@@ -501,26 +490,25 @@ export class FSWatcher extends EventEmitter<Events> {
       ino: info.ino,
       link,
     };
-    let previous = this.#entries.get(path);
+    let previous = entries.get(path);
     if (previous && (previous.dir !== next.dir || (next.dir && previous.link !== next.link))) {
-      this.#remove(path, true);
+      remove(path, true);
       previous = undefined;
     }
     if (!previous) {
-      if (next.dir) this.#pending.flush(path);
+      if (next.dir) pending.flush(path);
       // an unlink listener may have closed the watcher: the entry would be in the baseline without being reported
-      if (this.#closed) return;
-      this.#setEntry(path, next);
+      if (closed) return;
+      setEntry(path, next);
       if (next.dir) {
-        if (mode !== "quiet") this.#dispatch("addDir", path);
-      } else if (mode === "live" || this.#pending.isHeld(path)) this.#pending.announce("add", path);
-      else if (mode !== "quiet") this.#dispatch("add", path);
-      if (next.dir && left > 0) await this.#syncDir(path, left - 1, mode, ancestry);
+        if (mode !== "quiet") dispatch("addDir", path);
+      } else if (mode === "live" || pending.isHeld(path)) pending.announce("add", path);
+      else if (mode !== "quiet") dispatch("add", path);
+      if (next.dir && left > 0) await syncDir(path, left - 1, mode, ancestry);
       return;
     }
     // a directory remembered from a snapshot has not been read yet
-    if (next.dir && left > 0 && !this.#depthLeft.has(path))
-      await this.#syncDir(path, left - 1, mode, ancestry);
+    if (next.dir && left > 0 && !depthLeft.has(path)) await syncDir(path, left - 1, mode, ancestry);
     if (
       !next.dir &&
       (previous.mtimeMs !== next.mtimeMs ||
@@ -528,17 +516,17 @@ export class FSWatcher extends EventEmitter<Events> {
         previous.ino !== next.ino ||
         previous.link !== next.link)
     ) {
-      this.#setEntry(path, next);
-      if (mode === "seed") this.#dispatch("change", path);
-      else if (mode !== "quiet") this.#pending.announce("change", path, previous);
+      setEntry(path, next);
+      if (mode === "seed") dispatch("change", path);
+      else if (mode !== "quiet") pending.announce("change", path, previous);
     }
   }
 
-  #setEntry(path: string, entry: Entry): void {
-    this.#entries.set(path, entry);
+  function setEntry(path: string, entry: Entry): void {
+    entries.set(path, entry);
     const parent = dirname(path);
-    let siblings = this.#children.get(parent);
-    if (!siblings) this.#children.set(parent, (siblings = new Set()));
+    let siblings = children.get(parent);
+    if (!siblings) children.set(parent, (siblings = new Set()));
     siblings.add(path);
   }
 
@@ -546,83 +534,97 @@ export class FSWatcher extends EventEmitter<Events> {
    * Forgets `path` and everything below it, deepest first, optionally reporting each as unlink / unlinkDir.
    * With `defer`, the unlink of `path` itself is held back for the `atomic` window if it is a file.
    */
-  #remove(
+  function remove(
     path: string,
     report: boolean,
     only: (key: string) => boolean = () => true,
     defer = false,
   ): void {
-    this.#pending.dropHeld(path, only, report);
-    const keys = [...this.#entries.keys()].filter((key) => within(path, key) && only(key));
+    pending.dropHeld(path, only, report);
+    const keys = [...entries.keys()].filter((key) => within(path, key) && only(key));
     keys.sort((a, b) => b.length - a.length);
     for (const key of keys) {
       // a listener closed the watcher: what is left was not reported, so it stays for the snapshot
-      if (this.#closed) break;
-      const entry = this.#entries.get(key)!;
-      const job = this.#pending.cancel(key);
-      this.#entries.delete(key);
-      this.#denied.delete(key);
-      this.#children.get(dirname(key))?.delete(key);
-      this.#children.delete(key);
+      if (closed) break;
+      const entry = entries.get(key)!;
+      const job = pending.cancel(key);
+      entries.delete(key);
+      denied.delete(key);
+      children.get(dirname(key))?.delete(key);
+      children.delete(key);
       if (entry.dir) {
-        this.#depthLeft.delete(key);
-        this.#ancestry.delete(key);
-        this.#natives.release(key);
+        depthLeft.delete(key);
+        ancestries.delete(key);
+        natives.release(key);
       }
       // an add that never settled was never reported, so there is nothing to take back
       if (!report || job?.event === "add") continue;
-      if (entry.dir) this.#dispatch("unlinkDir", key);
-      else if (defer && this.#pending.holdsUnlinks && key === path)
-        this.#pending.hold(key, job?.before ?? entry);
-      else this.#dispatch("unlink", key);
+      if (entry.dir) dispatch("unlinkDir", key);
+      else if (defer && pending.holdsUnlinks && key === path)
+        pending.hold(key, job?.before ?? entry);
+      else dispatch("unlink", key);
     }
   }
 
-  #dispatch(event: WatchEvent, path: string): void {
-    if (this.#closed) return;
+  function dispatch(event: WatchEvent, path: string): void {
+    if (closed) return;
     // `emit` forwards the arguments as given, and the events map types them per event
-    (this.emit as (event: string, ...args: unknown[]) => boolean)(event, path);
-    if (!this.#closed) this.emit("all", event, path);
+    (emitter.emit as (event: string, ...args: unknown[]) => boolean)(event, path);
+    if (!closed) emitter.emit("all", event, path);
   }
 
   /** A path that vanished is a race with whoever removed it. A permission error is reported once per path until the path reads again. */
-  #fail(error: NodeJS.ErrnoException, path: string): void {
+  function fail(error: NodeJS.ErrnoException, path: string): void {
     const code = error.code ?? "";
-    if (this.#closed || VANISHED.has(code)) return;
+    if (closed || VANISHED.has(code)) return;
     if (DENIED.has(code)) {
-      if (this.#ignorePermissionErrors || this.#denied.has(path)) return;
-      this.#denied.add(path);
+      if (ignorePermissionErrors || denied.has(path)) return;
+      denied.add(path);
     }
-    this.emit("error", error);
+    emitter.emit("error", error);
   }
 
-  #needed(dir: string): boolean {
+  function needed(dir: string): boolean {
     return (
-      this.#depthLeft.has(dir) ||
-      [...this.#probes.values()].includes(dir) ||
-      [...this.#roots].some((root) => this.#kinds.get(root) === "file" && dirname(root) === dir)
+      depthLeft.has(dir) ||
+      [...probes.values()].includes(dir) ||
+      [...watchedRoots].some((root) => kinds.get(root) === "file" && dirname(root) === dir)
     );
   }
 
-  #onNative(dir: string): void {
-    if (this.#closed) return;
-    for (const root of this.#roots) {
-      const kind = this.#kinds.get(root);
+  function onNative(dir: string): void {
+    if (closed) return;
+    for (const root of watchedRoots) {
+      const kind = kinds.get(root);
       const affected =
         kind === "dir"
           ? root === dir
           : kind === "file"
             ? dirname(root) === dir
-            : this.#probes.get(root) === dir;
-      if (affected) void this.#serial(`root:${root}`, () => this.#syncRoot(root, "live"));
+            : probes.get(root) === dir;
+      if (affected) void serial(`root:${root}`, () => syncRoot(root, "live"));
     }
-    const left = this.#depthLeft.get(dir);
-    const ancestry = this.#ancestry.get(dir);
-    if (left !== undefined && ancestry && !this.#roots.has(dir))
-      void this.#serial(`dir:${dir}`, () => this.#syncDir(dir, left, "live", ancestry));
+    const left = depthLeft.get(dir);
+    const ancestry = ancestries.get(dir);
+    if (left !== undefined && ancestry && !watchedRoots.has(dir))
+      void serial(`dir:${dir}`, () => syncDir(dir, left, "live", ancestry));
   }
-}
+  const watcher = Object.defineProperties(emitter, {
+    ready: { get: () => ready, enumerable: true },
+    unwatched: { get: () => natives.unwatched(), enumerable: true },
+    snapshot: { value: snapshot, writable: true, configurable: true },
+    add: { value: add, writable: true, configurable: true },
+    unwatch: { value: unwatch, writable: true, configurable: true },
+    rescan: { value: rescan, writable: true, configurable: true },
+    close: { value: close, writable: true, configurable: true },
+  }) as unknown as FSWatcher;
 
-export function watch(paths: string | readonly string[], options?: WatchOptions): FSWatcher {
-  return new FSWatcher(paths, options);
+  const given = list(paths);
+  seed(options.since, given);
+  ready = begin(given, options.since !== undefined).then((result) => {
+    if (!closed) emitter.emit("ready", result);
+    scheduleRescan();
+    return result;
+  });
+  return watcher;
 }

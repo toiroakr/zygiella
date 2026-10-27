@@ -3,6 +3,7 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import * as zygiella from "../src/index.ts";
 import { watch, type FSWatcher } from "../src/index.ts";
 
 let dir: string;
@@ -44,4 +45,8 @@ test("ready is a promise and unwatched is a list, as properties", async () => {
   watcher = watch(dir);
   expect(await watcher.ready).toEqual({ missing: [] });
   expect(watcher.unwatched).toEqual([]);
+});
+
+test("FSWatcher is only a type: it is not exported as a value to construct or test with instanceof", () => {
+  expect("FSWatcher" in zygiella).toBe(false);
 });

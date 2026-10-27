@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { FSWatcher, watch } from "../src/index.ts";
+import { watch, type FSWatcher } from "../src/index.ts";
 
 // the children below run the real fs.watch; only this process has it silenced
 vi.mock("node:fs", async (importOriginal) => ({
@@ -63,10 +63,10 @@ test("the next read is scheduled once the previous one has finished, not on a fi
   vi.useFakeTimers();
   try {
     let finish!: () => void;
-    const rescan = vi
-      .spyOn(FSWatcher.prototype, "rescan")
-      .mockImplementation(() => new Promise<void>((done) => (finish = done)));
     watcher = watch(dir, { ignoreInitial: true, rescanInterval: 1000 });
+    const rescan = vi
+      .spyOn(watcher, "rescan")
+      .mockImplementation(() => new Promise<void>((done) => (finish = done)));
     let ready = false;
     void watcher.ready.then(() => (ready = true));
     // the first read of the directory is real I/O, so the settle wait is only registered after it
