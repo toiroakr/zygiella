@@ -1752,6 +1752,26 @@ describe("snapshot", () => {
     },
   );
 
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "a directory that cannot be inspected because its parent has no search permission keeps its baseline",
+    async () => {
+      await mkdir(join(dir, "parent", "q"), { recursive: true });
+      await writeFile(join(dir, "parent", "q", "a.txt"), "1");
+      const snapshot = await stopped(dir);
+      await chmod(join(dir, "parent"), 0o444);
+      try {
+        const { w, seen } = await start(dir, { since: snapshot, ignorePermissionErrors: true });
+        await settle();
+        expect(seen).toEqual([]);
+        expect(w.snapshot().entries.map((e) => e.path)).toContain(
+          join(dir, "parent", "q", "a.txt"),
+        );
+      } finally {
+        await chmod(join(dir, "parent"), 0o755);
+      }
+    },
+  );
+
   test("a directory is in the snapshot as a directory with the file entries around it", async () => {
     await mkdir(join(dir, "sub"));
     await writeFile(join(dir, "sub", "a.txt"), "12");
