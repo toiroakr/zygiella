@@ -671,6 +671,8 @@ export class FSWatcher extends EventEmitter<Events> {
     const keys = [...this.#entries.keys()].filter((key) => within(path, key) && only(key));
     keys.sort((a, b) => b.length - a.length);
     for (const key of keys) {
+      // a listener closed the watcher: what is left was not reported, so it stays for the snapshot
+      if (this.#closed) break;
       const entry = this.#entries.get(key)!;
       const job = this.#settling.get(key);
       clearTimeout(job?.timer);

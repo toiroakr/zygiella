@@ -1573,6 +1573,24 @@ describe("snapshot", () => {
     expect(w.snapshot().entries.map((e) => e.path)).not.toContain(join(dir, "a.txt"));
   });
 
+  test("what is still to be reported stays in the snapshot when an unlink listener closes the watcher", async () => {
+    await mkdir(join(dir, "sub"));
+    await writeFile(join(dir, "sub", "a.txt"), "1");
+    await writeFile(join(dir, "sub", "b.txt"), "1");
+    const { w } = await start(dir);
+    let unlinks = 0;
+    w.on("unlink", () => {
+      unlinks++;
+      void w.close();
+    });
+    await rm(join(dir, "sub"), { recursive: true });
+    await until(() => unlinks > 0);
+    await w.close();
+    await settle(100);
+    expect(unlinks).toBe(1);
+    expect(w.snapshot().entries.map((e) => e.path)).toContain(join(dir, "sub"));
+  });
+
   test("a directory is in the snapshot as a directory with the file entries around it", async () => {
     await mkdir(join(dir, "sub"));
     await writeFile(join(dir, "sub", "a.txt"), "12");

@@ -192,7 +192,8 @@ deleted since the last run, save `watcher.snapshot()` when you stop and pass it 
 writing the file is yours; zygiella does no I/O for it, so it stays dependency-free:
 
 ```ts
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { watch } from "zygiella";
 
 const file = ".cache/watch-snapshot.json";
@@ -206,6 +207,7 @@ watcher.on("all", (event, path) => console.log(event, path));
 await watcher.ready;
 
 // on exit
+await mkdir(dirname(file), { recursive: true });
 await writeFile(file, JSON.stringify(watcher.snapshot()));
 await watcher.close();
 ```
