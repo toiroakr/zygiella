@@ -99,10 +99,3 @@ export interface Entry {
   /** Where a link points when it is watched as itself; for a directory, its real path. */
   link?: string;
 }
-
-export interface Settling {
-  event: "add" | "change";
-  /** What was reported last, for a change that is still waiting: that is what `snapshot()` records. */
-  before?: Entry;
-  timer?: NodeJS.Timeout;
-}

@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import type { Stats } from "node:fs";
 import { lstat, readdir, readlink, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
+import { pendingEvents, type Pending } from "./pending.ts";
 import { DENIED, VANISHED, nativeWatches, type NativeWatches } from "./native.ts";
 import { recorded, seedEntries, toSnapshot } from "./snapshot.ts";
 import { EDITOR_TEMP, list, matcher, within, type Matcher } from "./match.ts";
@@ -9,7 +10,6 @@ import type {
   Entry,
   Events,
   ReadyResult,
-  Settling,
   Snapshot,
   SnapshotEntry,
   WatchEvent,
@@ -25,7 +25,6 @@ export type {
   WatchOptions,
 } from "./types.ts";
 
-const QUIET_MS = 50;
 const READY_SETTLE_MS = 50;
 const ATOMIC_MS = 100;
 // setTimeout treats a delay above 2 ** 31 - 1 as 1 ms
@@ -46,7 +45,6 @@ export class FSWatcher extends EventEmitter<Events> {
   readonly #ignorePermissionErrors: boolean;
   readonly #persistent: boolean;
   readonly #rescanInterval: number;
-  readonly #settle: { stabilityThreshold: number; pollInterval: number } | undefined;
 
   readonly #roots = new Set<string>();
   readonly #kinds = new Map<string, "dir" | "file" | "missing">();
@@ -57,11 +55,9 @@ export class FSWatcher extends EventEmitter<Events> {
   /** Real paths of the directories from the watched root down to each directory, the directory's own last. */
   readonly #ancestry = new Map<string, readonly string[]>();
   readonly #queues = new Map<string, { dirty: boolean; done: Promise<void> }>();
-  readonly #settling = new Map<string, Settling>();
-  /** An unlink held back for `atomic`: it is not reported yet, so `entry` is still what was last reported. */
-  readonly #unlinks = new Map<string, { timer: NodeJS.Timeout; entry: Entry }>();
   readonly #denied = new Set<string>();
   readonly #natives: NativeWatches;
+  readonly #pending: Pending;
   readonly #missingAtStart = new Set<string>();
   #rescanTimer: NodeJS.Timeout | undefined;
   #closed = false;
@@ -117,12 +113,31 @@ export class FSWatcher extends EventEmitter<Events> {
       );
     this.#rescanInterval = rescanInterval;
     const awf = options.awaitWriteFinish;
-    this.#settle = awf
-      ? {
-          stabilityThreshold: (typeof awf === "object" && awf.stabilityThreshold) || 2000,
-          pollInterval: (typeof awf === "object" && awf.pollInterval) || 100,
-        }
-      : undefined;
+    this.#pending = pendingEvents({
+      atomic: this.#atomic,
+      settle: awf
+        ? {
+            stabilityThreshold: (typeof awf === "object" && awf.stabilityThreshold) || 2000,
+            pollInterval: (typeof awf === "object" && awf.pollInterval) || 100,
+          }
+        : undefined,
+      followSymlinks: this.#followSymlinks,
+      timeout: (fn, ms) => this.#timeout(fn, ms),
+      dispatch: (event, path) => this.#dispatch(event, path),
+      stat: (path) => this.#stat(path),
+      settled: (path, info, link) => {
+        // the file may have been written again since the entry was read, with no native event to read it again
+        const entry = this.#entries.get(path);
+        if (entry && !entry.dir)
+          this.#entries.set(path, {
+            ...entry,
+            mtimeMs: info.mtimeMs,
+            size: info.size,
+            ino: info.ino,
+            link: info.isSymbolicLink() ? (link ?? entry.link) : undefined,
+          });
+      },
+    });
     const roots = list(paths);
     this.#seed(options.since, roots);
     this.#ready = this.#watch(roots, options.since !== undefined).then((result) => {
@@ -140,11 +155,10 @@ export class FSWatcher extends EventEmitter<Events> {
   snapshot(): Snapshot {
     const entries: SnapshotEntry[] = [];
     for (const [path, current] of this.#entries) {
-      const job = this.#settling.get(path);
-      if (job && !job.before) continue;
-      entries.push(recorded(path, job?.before ?? current));
+      const before = this.#pending.baseline(path, current);
+      if (before) entries.push(recorded(path, before));
     }
-    for (const [path, { entry }] of this.#unlinks) entries.push(recorded(path, entry));
+    for (const [path, entry] of this.#pending.heldEntries()) entries.push(recorded(path, entry));
     return toSnapshot(entries);
   }
 
@@ -224,18 +238,7 @@ export class FSWatcher extends EventEmitter<Events> {
   async close(): Promise<void> {
     this.#closed = true;
     clearTimeout(this.#rescanTimer);
-    // what was never reported is not what the snapshot should say the watcher saw
-    for (const [path, job] of this.#settling) {
-      clearTimeout(job.timer);
-      if (job.before) this.#entries.set(path, job.before);
-      else this.#entries.delete(path);
-    }
-    this.#settling.clear();
-    for (const [path, { timer, entry }] of this.#unlinks) {
-      clearTimeout(timer);
-      this.#entries.set(path, entry);
-    }
-    this.#unlinks.clear();
+    this.#pending.close(this.#entries);
     this.#natives.close();
     await Promise.all([...this.#queues.values()].map((q) => q.done));
   }
@@ -504,13 +507,13 @@ export class FSWatcher extends EventEmitter<Events> {
       previous = undefined;
     }
     if (!previous) {
-      if (next.dir) this.#flushUnlink(path);
+      if (next.dir) this.#pending.flush(path);
       // an unlink listener may have closed the watcher: the entry would be in the baseline without being reported
       if (this.#closed) return;
       this.#setEntry(path, next);
       if (next.dir) {
         if (mode !== "quiet") this.#dispatch("addDir", path);
-      } else if (mode === "live" || this.#unlinks.has(path)) this.#announce("add", path);
+      } else if (mode === "live" || this.#pending.isHeld(path)) this.#pending.announce("add", path);
       else if (mode !== "quiet") this.#dispatch("add", path);
       if (next.dir && left > 0) await this.#syncDir(path, left - 1, mode, ancestry);
       return;
@@ -527,7 +530,7 @@ export class FSWatcher extends EventEmitter<Events> {
     ) {
       this.#setEntry(path, next);
       if (mode === "seed") this.#dispatch("change", path);
-      else if (mode !== "quiet") this.#announce("change", path, previous);
+      else if (mode !== "quiet") this.#pending.announce("change", path, previous);
     }
   }
 
@@ -549,22 +552,14 @@ export class FSWatcher extends EventEmitter<Events> {
     only: (key: string) => boolean = () => true,
     defer = false,
   ): void {
-    for (const [key, { timer }] of this.#unlinks) {
-      if (!within(path, key) || !only(key) || (report && key === path)) continue;
-      clearTimeout(timer);
-      this.#unlinks.delete(key);
-      // what is below a directory that goes away is reported before the directory is
-      if (report) this.#dispatch("unlink", key);
-    }
+    this.#pending.dropHeld(path, only, report);
     const keys = [...this.#entries.keys()].filter((key) => within(path, key) && only(key));
     keys.sort((a, b) => b.length - a.length);
     for (const key of keys) {
       // a listener closed the watcher: what is left was not reported, so it stays for the snapshot
       if (this.#closed) break;
       const entry = this.#entries.get(key)!;
-      const job = this.#settling.get(key);
-      clearTimeout(job?.timer);
-      this.#settling.delete(key);
+      const job = this.#pending.cancel(key);
       this.#entries.delete(key);
       this.#denied.delete(key);
       this.#children.get(dirname(key))?.delete(key);
@@ -577,8 +572,8 @@ export class FSWatcher extends EventEmitter<Events> {
       // an add that never settled was never reported, so there is nothing to take back
       if (!report || job?.event === "add") continue;
       if (entry.dir) this.#dispatch("unlinkDir", key);
-      else if (defer && this.#atomic > 0 && key === path)
-        this.#holdUnlink(key, job?.before ?? entry);
+      else if (defer && this.#pending.holdsUnlinks && key === path)
+        this.#pending.hold(key, job?.before ?? entry);
       else this.#dispatch("unlink", key);
     }
   }
@@ -588,80 +583,6 @@ export class FSWatcher extends EventEmitter<Events> {
     // `emit` forwards the arguments as given, and the events map types them per event
     (this.emit as (event: string, ...args: unknown[]) => boolean)(event, path);
     if (!this.#closed) this.emit("all", event, path);
-  }
-
-  #takeHeld(path: string): Entry | undefined {
-    const held = this.#unlinks.get(path);
-    if (!held) return undefined;
-    clearTimeout(held.timer);
-    this.#unlinks.delete(path);
-    return held.entry;
-  }
-
-  #flushUnlink(path: string): void {
-    if (this.#takeHeld(path)) this.#dispatch("unlink", path);
-  }
-
-  #holdUnlink(path: string, entry: Entry): void {
-    const timer = this.#timeout(() => {
-      this.#unlinks.delete(path);
-      this.#dispatch("unlink", path);
-    }, this.#atomic);
-    this.#unlinks.set(path, { timer, entry });
-  }
-
-  #announce(event: "add" | "change", path: string, before?: Entry): void {
-    const held = this.#takeHeld(path);
-    if (held) event = "change";
-    const settle = this.#settle;
-    const prior = this.#settling.get(path);
-    clearTimeout(prior?.timer);
-    const job: Settling = {
-      event: prior?.event === "add" ? "add" : event,
-      before: prior ? prior.before : (before ?? held),
-    };
-    this.#settling.set(path, job);
-    if (!settle) {
-      // Linux reports a write as truncate then write, and a new file as create then write: one report for the burst
-      job.timer = this.#timeout(() => {
-        this.#settling.delete(path);
-        this.#dispatch(job.event, path);
-      }, QUIET_MS);
-      return;
-    }
-    let last: string | undefined;
-    let since = Date.now();
-    const poll = async (): Promise<void> => {
-      const info = await this.#stat(path).catch(() => undefined);
-      const link =
-        !this.#followSymlinks && info?.isSymbolicLink()
-          ? await readlink(path).catch(() => undefined)
-          : undefined;
-      if (this.#settling.get(path) !== job) return;
-      // gone: the directory diff reports the unlink, and needs this job to know whether the add was ever announced
-      if (!info) return;
-      const key = `${info.size}:${info.mtimeMs}`;
-      if (key !== last) {
-        last = key;
-        since = Date.now();
-      } else if (Date.now() - since >= settle.stabilityThreshold) {
-        this.#settling.delete(path);
-        // the file may have been written again since the entry was read, with no native event to read it again
-        const entry = this.#entries.get(path);
-        if (entry && !entry.dir)
-          this.#entries.set(path, {
-            ...entry,
-            mtimeMs: info.mtimeMs,
-            size: info.size,
-            ino: info.ino,
-            link: info.isSymbolicLink() ? (link ?? entry.link) : undefined,
-          });
-        this.#dispatch(job.event, path);
-        return;
-      }
-      job.timer = this.#timeout(poll, settle.pollInterval);
-    };
-    job.timer = this.#timeout(poll, settle.pollInterval);
   }
 
   /** A path that vanished is a race with whoever removed it. A permission error is reported once per path until the path reads again. */
