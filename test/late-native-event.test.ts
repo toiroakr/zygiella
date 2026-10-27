@@ -74,16 +74,36 @@ async function until(predicate: () => boolean, ms = 3000): Promise<void> {
 
 const settle = (ms = 300) => new Promise((r) => setTimeout(r, ms));
 
+async function watching(target: string, file: string) {
+  native.watched = file;
+  const w = watch(target, { ignoreInitial: true });
+  watchers.push(w);
+  const seen: Array<[string, string]> = [];
+  w.on("all", (event, path) => seen.push([event, path]));
+  await new Promise<void>((r) => w.once("ready", () => r()));
+  return seen;
+}
+
 describe("a write whose native event arrives after the quiet period", () => {
+  test("is reported as add only when a new file was empty at the first read and complete at the second", async () => {
+    const file = join(dir, "a.txt");
+    const seen = await watching(dir, file);
+
+    await writeFile(file, "");
+    native.deliver();
+    await until(() => native.sizesRead.includes(0));
+    await writeFile(file, "22");
+    await until(() => seen.length > 0);
+    native.deliver();
+    await settle();
+
+    expect(seen).toEqual([["add", file]]);
+  });
+
   test("is reported as one change when the file was truncated at the first read and complete at the second", async () => {
     const file = join(dir, "a.txt");
     await writeFile(file, "1");
-    native.watched = file;
-    const w = watch(file, { ignoreInitial: true });
-    watchers.push(w);
-    const seen: Array<[string, string]> = [];
-    w.on("all", (event, path) => seen.push([event, path]));
-    await new Promise<void>((r) => w.once("ready", () => r()));
+    const seen = await watching(file, file);
 
     await truncate(file, 0);
     native.deliver();
