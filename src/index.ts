@@ -315,7 +315,10 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     const previousParent = kinds.get(root) === "file" ? dirname(root) : undefined;
     if (mode !== "live") missingAtStart.delete(root);
     const { info, link, real, unreadable } = await statRoot(root, mode);
-    if (closed || !watchedRoots.has(root)) return;
+    if (closed || !watchedRoots.has(root)) {
+      natives.release(root);
+      return;
+    }
     if (info && !info.isDirectory()) denied.delete(root);
 
     if (!info) {
