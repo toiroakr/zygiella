@@ -519,6 +519,29 @@ describe("a read of the file that completes after the change was reported", () =
     },
   );
 
+  test("detects a root that is created again when it was deleted while its real path was being resolved at startup", async () => {
+    const root = join(dir, "root");
+    await mkdir(root);
+    native.watched = root;
+    native.hold("realpath", false, root);
+    const w = watch(root, { ignoreInitial: true, atomic: false });
+    watchers.push(w);
+    w.on("error", () => {});
+    const seen: Array<[string, string]> = [];
+    w.on("all", (event, path) => seen.push([event, path]));
+    await until(() => native.held);
+    await rm(root, { recursive: true, force: true });
+    native.deliver();
+    native.open();
+    await new Promise<void>((r) => w.once("ready", () => r()));
+    await mkdir(root);
+    await writeFile(join(root, "file"), "1");
+    native.deliver();
+    await until(() => seen.some(([event]) => event === "add"));
+
+    expect(seen).toContainEqual(["add", join(root, "file")]);
+  });
+
   test.skipIf(process.platform === "win32")(
     "does not report the link target again when the read of it completes after the change was reported",
     async () => {
