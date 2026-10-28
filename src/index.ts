@@ -36,6 +36,9 @@ const differs = (previous: Entry, next: Entry): boolean =>
   previous.size !== next.size ||
   previous.ino !== next.ino ||
   previous.link !== next.link;
+// a file system that reports no inode number (0) cannot tell a replaced directory from the same one
+const replaced = (previous: Entry, next: Entry): boolean =>
+  previous.ino !== 0 && next.ino !== 0 && previous.ino !== next.ino;
 const isTrue = (): boolean => true;
 const isFalse = (): boolean => false;
 
@@ -664,7 +667,11 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       link,
     };
     let previous = entries.get(path);
-    if (previous && (previous.dir !== next.dir || (next.dir && previous.link !== next.link))) {
+    if (
+      previous &&
+      (previous.dir !== next.dir ||
+        (next.dir && (previous.link !== next.link || replaced(previous, next))))
+    ) {
       remove(path, true);
       previous = undefined;
     }

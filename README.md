@@ -287,6 +287,10 @@ await watcher.close();
 
 - A burst of events for one file is reported once, 50 ms after the last event (Linux reports a write as truncate
   then write, and a new file as create then write). `awaitWriteFinish` replaces that wait.
+- A directory whose inode number changed between two reads is another directory under the same name (`mv src
+  src.old` and then `mv staging src`): it is reported as `unlinkDir` with what was in it as `unlink`, then as
+  `addDir` with what is in it now as `add`. A file system that reports inode 0 cannot tell, and a freed inode
+  number that is given to the new directory is not noticed either; `rescan()` does not help in those cases.
 - `ready` comes 50 ms after the OS watchers are attached, because `fs.watch` returns before macOS starts
   delivering events and a change made in that gap would be lost.
 - Every event re-reads the directory it came from and compares it with what was seen before. A directory with more

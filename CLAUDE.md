@@ -58,6 +58,9 @@ set), `pending.ts` (add / change waiting to settle and unlinks held for `atomic`
 - A native watcher error is retried by one re-sync of its directory (a read of everything for a tree watch), except `EMFILE` / `ENOSPC` and the fourth error
   in a row without an event (`native.ts`), after which only `rescan()` lets that path be watched again (`retry`; releasing it with `unwatch()` forgets it too), and nothing below a root whose tree watch was given up is watched one by one until then (`blockedTrees`); the state is recorded before the `error` event is emitted; a re-watch after `EMFILE` on macOS made libuv rebuild its one stream for
   every handle, and the process never reached `ready`.
+- `visit` treats a directory whose inode differs from the entry (both not 0) as another directory under the same name
+  and goes through `remove` and `visitNew`, so a directory moved away and replaced by another one reports
+  `unlinkDir` / `unlink` and then `addDir` / `add`. chokidar does the same (`replacedSinceObserved` in `tree.ts`).
 - `Mode` decides whether a diff reports: `quiet` (remember only, for `ignoreInitial`), `initial` (report at
   once, it is what `ready` waits for) and `live` (report after a quiet period, see below).
 - `add` and `change` reports wait for 50 ms of quiet per file, because Linux splits a write into truncate and
