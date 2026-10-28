@@ -105,6 +105,11 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   const queues = new Map<string, { dirty: boolean; done: Promise<void> }>();
   const denied = new Set<string>();
   const missingAtStart = new Set<string>();
+  /**
+   * The reads of each path that have not returned yet. Marking them as stale beats comparing a count taken before and
+   * after: a count has to be dropped with the path and then reads again the value that a read still in flight took.
+   */
+  const reads = new Map<string, Set<{ stale: boolean }>>();
   let rescanTimer: NodeJS.Timeout | undefined;
   let closed = false;
   let ready: Promise<ReadyResult>;
@@ -152,7 +157,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   /** The file settled at this size and mtime: the entry may not know yet, as no native event reads it again. */
   function settled(path: string, info: Stats, link: string | undefined): void {
     const entry = entries.get(path);
-    if (entry && !entry.dir)
+    if (entry && !entry.dir) {
+      staleReads(path);
       entries.set(path, {
         ...entry,
         mtimeMs: info.mtimeMs,
@@ -160,6 +166,36 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
         ino: info.ino,
         link: info.isSymbolicLink() ? (link ?? entry.link) : undefined,
       });
+    }
+  }
+
+  function staleReads(path: string): void {
+    for (const read of reads.get(path) ?? []) read.stale = true;
+  }
+
+  /**
+   * Reads again when `settled` recorded the path, or `remove` forgot it, while the read was in flight: the result
+   * may be older than the entry and would put it back. Dropping it instead could lose a newer state whose native
+   * event was merged into the one that started this read. The mark is not kept until `visit()` uses the result:
+   * nothing but promise callbacks sits between the two, so `settled()`, which runs from a timer or an I/O callback,
+   * cannot run in between.
+   */
+  async function unsettled<T>(path: string, read: () => Promise<T>): Promise<T> {
+    for (;;) {
+      const mark = { stale: false };
+      let marks = reads.get(path);
+      if (!marks) reads.set(path, (marks = new Set()));
+      marks.add(mark);
+      try {
+        const result = await read();
+        if (!mark.stale) return result;
+      } catch (error) {
+        if (!mark.stale) throw error;
+      } finally {
+        marks.delete(mark);
+        if (!marks.size && reads.get(path) === marks) reads.delete(path);
+      }
+    }
   }
 
   /** Remembers what `since` holds for the watched roots, so the first scan reports only the difference. */
@@ -299,8 +335,11 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     const previousProbe = probes.get(root);
     const previousParent = kinds.get(root) === "file" ? dirname(root) : undefined;
     if (mode !== "live") missingAtStart.delete(root);
-    const { info, link, unreadable } = await statRoot(root, mode);
-    if (closed || !watchedRoots.has(root)) return;
+    const { info, link, real, unreadable } = await statRoot(root, mode);
+    if (closed || !watchedRoots.has(root)) {
+      natives.release(root);
+      return;
+    }
     if (info && !info.isDirectory()) denied.delete(root);
 
     if (!info) {
@@ -312,7 +351,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     }
 
     if (!entries.has(root) && ignored.byStats?.(root, info)) watchSkipped(root, info);
-    else await scanRoot(root, info, link, mode);
+    else await scanRoot(root, info, link, real, mode);
     if (previousProbe) natives.release(previousProbe);
     if (previousParent) natives.release(previousParent);
   }
@@ -330,6 +369,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     root: string,
     info: Stats,
     link: string | undefined,
+    real: string,
     mode: Mode,
   ): Promise<void> {
     probes.delete(root);
@@ -341,7 +381,6 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     }
     kinds.set(root, "dir");
     natives.ensure(root);
-    const real = await realpath(root).catch(() => root);
     await visit(root, info, 0, mode, [], real);
     await syncDir(root, maxDepth, mode, [real]);
   }
@@ -349,20 +388,38 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   async function statRoot(
     root: string,
     mode: Mode,
-  ): Promise<{ info: Stats | undefined; link: string | undefined; unreadable: boolean }> {
+  ): Promise<{
+    info: Stats | undefined;
+    link: string | undefined;
+    real: string;
+    unreadable: boolean;
+  }> {
     let unreadable = false;
-    let info = await followStat(root).catch((error: NodeJS.ErrnoException) => {
+    const read = await unsettled(root, async () => {
+      const info = await followStat(root);
+      const link =
+        !followSymlinks && info.isSymbolicLink()
+          ? await readlink(root).catch(() => undefined)
+          : undefined;
+      if (info.isDirectory()) {
+        kinds.set(root, "dir");
+        natives.ensure(root);
+      }
+      const real = info.isDirectory() ? await realpath(root).catch(() => root) : root;
+      return { info, link, real };
+    }).catch((error: NodeJS.ErrnoException) => {
       fail(error, root);
       unreadable = !VANISHED.has(error.code ?? "");
       if (mode !== "live" && VANISHED.has(error.code ?? "")) missingAtStart.add(root);
       return undefined;
     });
-    let link: string | undefined;
-    if (!followSymlinks && info?.isSymbolicLink()) {
-      link = await readlink(root).catch(() => undefined);
-      if (link === undefined) info = undefined;
-    }
-    return { info, link, unreadable };
+    const gone = !!read && !followSymlinks && read.info.isSymbolicLink() && read.link === undefined;
+    return {
+      info: gone ? undefined : read?.info,
+      link: read?.link,
+      real: read?.real ?? root,
+      unreadable,
+    };
   }
 
   /** Watches the nearest directory that exists, so that the root is seen when it is created. */
@@ -438,28 +495,46 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       if (!VANISHED.has(error.code ?? "")) uninspectable.add(path);
       return undefined;
     };
+    const covered = () => [...watchedRoots].some((root) => within(root, dir));
+    const examine = async (path: string): Promise<boolean> => {
+      const found = await inspect(path, left, mode, ancestry, failed);
+      if (!found) return false;
+      // an unlink listener may have unwatched the directory while the read was in flight
+      if (closed || !covered()) return true;
+      seen.add(path);
+      await visit(
+        path,
+        found.info,
+        found.descend,
+        mode,
+        [...ancestry, found.real],
+        found.info.isDirectory() ? found.real : found.link,
+      );
+      return true;
+    };
+    await Promise.all(names.map((name) => examine(join(dir, name))));
+    if (closed) return;
+    const listed = new Set(names);
+    // One name at a time would make a bulk removal wait for a round trip per file, and waiting for all of them before
+    // removing any would leave the window open again, so each is removed as soon as its own check is done.
     await Promise.all(
-      names.map(async (name) => {
-        const path = join(dir, name);
-        const found = await inspect(path, left, mode, ancestry, failed);
-        if (!found) return;
-        seen.add(path);
-        await visit(
-          path,
-          found.info,
-          found.descend,
-          mode,
-          [...ancestry, found.real],
-          found.info.isDirectory() ? found.real : found.link,
-        );
+      Array.from(children.get(dir) ?? [], async (path) => {
+        if (seen.has(path) || uninspectable.has(path) || watchedRoots.has(path)) return;
+        if (!covered() || !children.get(dir)?.has(path)) return;
+        // The siblings may have taken long: a file that was missing at its read can be back and reported since then. Not
+        // a directory: one that is being deleted can still be read, and keeping it would keep its native watcher open.
+        if (entries.get(path)?.dir === false) {
+          if ((await examine(path)) || closed) return;
+          // what was true before the check may not be any more: `add()` can have made the path a root of its own
+          if (watchedRoots.has(path) || !covered() || !children.get(dir)?.has(path)) return;
+          // a refused read does not keep a name the listing did not have (a directory that is being deleted can refuse one),
+          // but a name it had, whose first read found it missing, is not known to be gone
+          if (listed.has(basename(path)) && uninspectable.has(path)) return;
+        }
+        remove(path, true, undefined, mode !== "seed");
       }),
     );
     if (closed) return;
-    for (const path of children.get(dir) ?? []) {
-      if (!seen.has(path) && !uninspectable.has(path) && !watchedRoots.has(path))
-        remove(path, true, undefined, mode !== "seed");
-    }
-    const listed = new Set(names);
     for (const path of denied) {
       if (dirname(path) === dir && !listed.has(basename(path))) denied.delete(path);
     }
@@ -485,18 +560,23 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     failed: Failed,
   ): Promise<Found | undefined> {
     if (ignored.byPath(path)) return;
-    const own = await lstat(path).catch((error) => failed(error, path));
-    if (!own) return;
+    const read = await unsettled(path, async () => {
+      const own = await lstat(path);
+      return {
+        own,
+        link: !followSymlinks && own.isSymbolicLink() ? await readlink(path) : undefined,
+      };
+    }).catch((error) => failed(error, path));
+    if (!read) return;
+    const { own } = read;
     let found: Found | undefined = {
       info: own,
       real: join(ancestry.at(-1)!, basename(path)),
-      link: undefined,
+      link: read.link,
       descend: left,
     };
-    if (own.isSymbolicLink()) {
-      found = followSymlinks
-        ? await followLink(path, found, mode, ancestry, failed)
-        : await readLink(path, found, failed);
+    if (own.isSymbolicLink() && followSymlinks) {
+      found = await followLink(path, found, mode, ancestry, failed);
       if (!found) return;
     }
     if (own.isSymbolicLink() || !found.info.isDirectory()) denied.delete(path);
@@ -511,21 +591,18 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     ancestry: readonly string[],
     failed: Failed,
   ): Promise<Found | undefined> {
-    const info = await stat(path).catch((error) => failed(error, path));
-    if (!info) return;
-    if (!info.isDirectory()) return { ...found, info };
-    const real = await realpath(path).catch((error) => failed(error, path));
-    if (!real) return;
+    const target = await unsettled(path, async () => {
+      const info = await stat(path);
+      return { info, real: info.isDirectory() ? await realpath(path) : undefined };
+    }).catch((error) => failed(error, path));
+    if (!target) return;
+    const { info, real } = target;
+    if (!real) return { ...found, info };
     // a link to a directory already on the way down would loop forever
     if (!ancestry.includes(real)) return { ...found, info, real };
     // a link that points somewhere else than before is reported by `visit`, with what was below it
     if (mode === "seed" && entries.get(path)?.link === real) forgetBelow(path);
     return { ...found, info, real, descend: 0 };
-  }
-
-  async function readLink(path: string, found: Found, failed: Failed): Promise<Found | undefined> {
-    const link = await readlink(path).catch((error) => failed(error, path));
-    return link === undefined ? undefined : { ...found, link };
   }
 
   async function visit(
@@ -608,6 +685,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       const entry = entries.get(key)!;
       const job = pending.cancel(key);
       entries.delete(key);
+      staleReads(key);
       denied.delete(key);
       children.get(dirname(key))?.delete(key);
       children.delete(key);
