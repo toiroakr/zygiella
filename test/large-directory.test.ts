@@ -257,12 +257,15 @@ describe("a full read and a named entry read of the same large directory", () =>
     try {
       await until(() => gate.reached);
       await writeFile(join(big, "late"), "1");
+      // the named read has to finish while the full read is still held, or the two would not overlap
+      await until(() =>
+        seen.some(([event, path]) => event === "add" && path === join(big, "late")),
+      );
     } finally {
       // close() in afterEach waits for the read that is held back
       release();
     }
     await scan;
-    await until(() => seen.some(([event, path]) => event === "add" && path === join(big, "late")));
     expect(seen.filter(([event]) => event === "unlink")).toEqual([]);
   });
 
