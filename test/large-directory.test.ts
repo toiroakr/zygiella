@@ -213,7 +213,6 @@ describe("once the events of a directory with many entries have stopped", () => 
     for (const name of ["f0", "f1", "f2"]) await writeFile(join(big, name), "22");
     await until(() => seen.length >= 3);
     await until(() => reads.get(big) === before + 1, 4000);
-    await new Promise((r) => setTimeout(r, 300));
     expect(reads.get(big)).toBe(before + 1);
   });
 

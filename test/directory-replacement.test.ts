@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, realpath, rename, rm as removeOnce, writeFile } from "node:fs/promises";
+import { renameSync } from "node:fs";
+import { mkdir, mkdtemp, realpath, rm as removeOnce, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -40,10 +41,10 @@ async function until(predicate: () => boolean, ms = 3000): Promise<void> {
 const reported = (seen: Array<[string, string]>, event: string, path: string) =>
   seen.some(([e, p]) => e === event && p === path);
 
-// `src` is moved away and another directory with other contents is moved to its name before the watcher reads either
-async function replaceSrc() {
-  await rename(join(dir, "src"), join(dir, "src.old"));
-  await rename(join(dir, "staging"), join(dir, "src"));
+// one after the other without a pause, so that the watcher cannot read `src` between the two
+function replaceSrc() {
+  renameSync(join(dir, "src"), join(dir, "src.old"));
+  renameSync(join(dir, "staging"), join(dir, "src"));
 }
 
 test("a directory replaced by another directory reports what was in it as removed and what is in it now as added", async () => {
@@ -52,12 +53,13 @@ test("a directory replaced by another directory reports what was in it as remove
   await mkdir(join(dir, "staging"));
   await writeFile(join(dir, "staging", "b.ts"), "b");
   const { seen } = await start(dir);
-  await replaceSrc();
+  replaceSrc();
   await until(() => reported(seen, "add", join(dir, "src", "b.ts")));
   expect(reported(seen, "unlink", join(dir, "src", "a.ts"))).toBe(true);
-  expect(seen.findIndex(([e, p]) => e === "unlinkDir" && p === join(dir, "src"))).toBeLessThan(
-    seen.findIndex(([e, p]) => e === "addDir" && p === join(dir, "src")),
-  );
+  const indexOf = (event: string) =>
+    seen.findIndex(([e, p]) => e === event && p === join(dir, "src"));
+  expect(indexOf("unlinkDir")).toBeGreaterThanOrEqual(0);
+  expect(indexOf("unlinkDir")).toBeLessThan(indexOf("addDir"));
 });
 
 // Windows refuses to rename a directory while a watch is open on a directory inside it (EPERM)
@@ -69,7 +71,7 @@ test.skipIf(process.platform === "win32")(
     await mkdir(join(dir, "staging", "deep"), { recursive: true });
     await writeFile(join(dir, "staging", "deep", "b.ts"), "b");
     const { seen } = await start(dir);
-    await replaceSrc();
+    replaceSrc();
     await until(() => reported(seen, "add", join(dir, "src", "deep", "b.ts")));
     expect(reported(seen, "unlink", join(dir, "src", "deep", "a.ts"))).toBe(true);
   },
