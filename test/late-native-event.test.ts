@@ -482,6 +482,44 @@ describe("a read of the file that completes after the change was reported", () =
   );
 
   test.skipIf(process.platform === "win32")(
+    "does not turn a root link into a directory when it points to a file again before the real path of the root is used",
+    async () => {
+      const link = join(dir, "link");
+      const file1 = join(dir, "file1");
+      const file2 = join(dir, "file2");
+      const sub = join(dir, "sub");
+      const replaceLink = async (target: string) => {
+        await symlink(target, `${link}.tmp`);
+        await rename(`${link}.tmp`, link);
+      };
+      await writeFile(file1, "1");
+      await writeFile(file2, "1");
+      await mkdir(sub);
+      await symlink(file1, link);
+      const { w, seen } = await watching(link, link, { atomic: false });
+      const readsBefore = native.reads.length;
+
+      native.holdRefresh();
+      await writeFile(file1, "22");
+      native.deliver();
+      await until(
+        () => native.reads.slice(readsBefore).filter((path) => path === link).length >= 1,
+      );
+      native.hold("realpath", false, link);
+      await replaceLink(sub);
+      native.deliver();
+      await until(() => native.held);
+      await replaceLink(file2);
+      native.releaseRefresh();
+      await until(() => seen.some(([, path]) => path === link));
+      native.open();
+      await w.rescan();
+
+      expect(seen.filter(([, path]) => path === link)).toEqual([["change", link]]);
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
     "does not report the link target again when the read of it completes after the change was reported",
     async () => {
       const link = join(dir, "link");
