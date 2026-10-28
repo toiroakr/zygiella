@@ -377,6 +377,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
         !followSymlinks && info.isSymbolicLink()
           ? await readlink(root).catch(() => undefined)
           : undefined;
+      if (info.isDirectory()) natives.ensure(root);
       const real = info.isDirectory() ? await realpath(root).catch(() => root) : root;
       return { info, link, real };
     }).catch((error: NodeJS.ErrnoException) => {
