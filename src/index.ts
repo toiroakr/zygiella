@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import type { Stats } from "node:fs";
 import { lstat, readdir, readlink, realpath, stat } from "node:fs/promises";
-import { basename, dirname, join, sep } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { pendingEvents } from "./pending.ts";
 import { DENIED, VANISHED, nativeWatches, nearestDirectory } from "./native.ts";
 import { recorded, seedEntries, toSnapshot } from "./snapshot.ts";
@@ -27,11 +27,18 @@ export type {
 } from "./types.ts";
 
 const READY_SETTLE_MS = 50;
+// above this many entries a native event is trusted for the name it carries instead of reading the whole directory
+const LARGE_DIRECTORY = 1000;
+// such a directory is read whole once its events have stopped for this long, so an event that was lost is repaired
+const AUDIT_QUIET_MS = 1000;
 const differs = (previous: Entry, next: Entry): boolean =>
   previous.mtimeMs !== next.mtimeMs ||
   previous.size !== next.size ||
   previous.ino !== next.ino ||
   previous.link !== next.link;
+// a file system that reports no inode number (0) cannot tell a replaced directory from the same one
+const replaced = (previous: Entry, next: Entry): boolean =>
+  previous.ino !== 0 && next.ino !== 0 && previous.ino !== next.ino;
 const isTrue = (): boolean => true;
 const isFalse = (): boolean => false;
 
@@ -54,7 +61,7 @@ export interface FSWatcher extends EventEmitter<Events> {
   /**
    * Directories that are read but have no native watch, because `fs.watch` threw (`ENOSPC`, `EMFILE`) or the
    * watcher reported an error. Changes below them are missed until `rescan()` reads them, and it also tries to
-   * watch them again.
+   * watch them again. Where a whole tree is one native watch (macOS), the watched path stands for the tree.
    */
   readonly unwatched: readonly string[];
   /**
@@ -105,6 +112,12 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   const queues = new Map<string, { dirty: boolean; done: Promise<void> }>();
   const denied = new Set<string>();
   const missingAtStart = new Set<string>();
+  /** The real path of each directory root that has been read, which is what its tree watch reports below it. */
+  const realRoots = new Map<string, string>();
+  let retryLimits = false;
+  const audits = new Map<string, NodeJS.Timeout>();
+  /** For each directory the full reads going through it, each with the paths a named entry read recorded meanwhile. */
+  const scanning = new Map<string, Set<Set<string>>>();
   /**
    * The reads of each path that have not returned yet. Marking them as stale beats comparing a count taken before and
    * after: a count has to be dropped with the path and then reads again the value that a read still in flight took.
@@ -114,7 +127,15 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   let closed = false;
   let ready: Promise<ReadyResult>;
 
-  const natives = nativeWatches({ persistent, needed, onChange: onNative, onError: fail });
+  const natives = nativeWatches({
+    persistent,
+    needed,
+    onChange: onNative,
+    onLost: () => {
+      if (!closed) void serial("rescan", () => rescanOnce());
+    },
+    onError: fail,
+  });
   const pending = pendingEvents({
     atomic: atomicMs,
     settle,
@@ -221,9 +242,11 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
 
   function forget(path: string): void {
     watchedRoots.delete(path);
+    realRoots.delete(path);
     missingAtStart.delete(path);
     for (const key of denied) if (within(path, key)) denied.delete(key);
     kinds.delete(path);
+    natives.releaseTree(path);
     const probe = probes.get(path);
     probes.delete(path);
     remove(path, false, (key) => ![...watchedRoots].some((root) => within(root, key)));
@@ -231,7 +254,22 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     // a directory whose watch failed has no entry, so remove never released it
     for (const key of natives.unwatched()) if (within(path, key)) natives.release(key);
     const parent = dirname(path);
-    if (parent !== path) natives.release(parent);
+    if (parent !== path) {
+      natives.release(parent);
+      // release keeps a directory that is still tracked, but a tree may report it now that no file waits for it
+      const ancestry = ancestries.get(parent);
+      if (ancestry && physical(parent, ancestry)) natives.covered(parent, waitedFor(parent));
+    }
+    // what stays tracked below the path may have been reported by the tree watch that is closed now, as the directory
+    // behind a link that was a root of its own: it needs a watch of its own again unless another tree reports it. So
+    // do the directories that a watched file or a path that does not exist yet is waited for through. Each is tried
+    // once, and one whose watch failed stays listed and is not tried again by this.
+    const again = new Set(probes.values());
+    for (const root of watchedRoots) if (kinds.get(root) === "file") again.add(dirname(root));
+    for (const [dir, ancestry] of ancestries)
+      if (within(path, dir) && depthLeft.has(dir) && !physical(dir, ancestry)) again.add(dir);
+    const failed = new Set(natives.unwatched());
+    for (const dir of again) if (!failed.has(dir)) natives.ensure(dir);
   }
 
   /**
@@ -240,11 +278,16 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
    */
   async function rescan(): Promise<void> {
     if (closed) return;
+    retryLimits = true;
     // a call made while a rescan runs makes it run once more afterwards, so two rescans never read at the same time
     await serial("rescan", () => rescanOnce());
   }
 
   async function rescanOnce(): Promise<void> {
+    // a limit that stopped a watch may be gone by now, but only a call of rescan() lets the watches try again, not the
+    // read that a tree watch asks for after it lost track
+    if (retryLimits) natives.retry();
+    retryLimits = false;
     await Promise.all(
       [...watchedRoots].map((root) => serial(`root:${root}`, () => syncRoot(root, "live"))),
     );
@@ -273,6 +316,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   async function close(): Promise<void> {
     closed = true;
     clearTimeout(rescanTimer);
+    for (const timer of audits.values()) clearTimeout(timer);
+    audits.clear();
     pending.close(entries);
     natives.close();
     await Promise.all([...queues.values()].map((q) => q.done));
@@ -365,6 +410,11 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     natives.ensure(info.isDirectory() ? root : dirname(root));
   }
 
+  function attachRoot(root: string): void {
+    // a finite depth leaves most of the tree unwatched, which one watch for the whole tree cannot do
+    if (maxDepth !== Infinity || !natives.ensureTree(root)) natives.ensure(root);
+  }
+
   async function scanRoot(
     root: string,
     info: Stats,
@@ -380,8 +430,11 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       return;
     }
     kinds.set(root, "dir");
-    natives.ensure(root);
+    attachRoot(root);
+    realRoots.set(root, real);
     await visit(root, info, 0, mode, [], real);
+    // a root that was replaced was removed by `visit`, which closed its tree watch
+    if (!closed && watchedRoots.has(root)) attachRoot(root);
     await syncDir(root, maxDepth, mode, [real]);
   }
 
@@ -403,7 +456,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
           : undefined;
       if (info.isDirectory()) {
         kinds.set(root, "dir");
-        natives.ensure(root);
+        attachRoot(root);
       }
       const real = info.isDirectory() ? await realpath(root).catch(() => root) : root;
       return { info, link, real };
@@ -476,11 +529,32 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     mode: Mode,
     ancestry: readonly string[],
   ): Promise<void> {
+    // a named entry read that runs while this one lists the directory records entries the list is too early to contain
+    const recorded = new Set<string>();
+    let reads = scanning.get(dir);
+    if (!reads) scanning.set(dir, (reads = new Set()));
+    reads.add(recorded);
+    try {
+      await readDir(dir, left, mode, ancestry, recorded);
+    } finally {
+      reads.delete(recorded);
+      if (!reads.size && scanning.get(dir) === reads) scanning.delete(dir);
+    }
+  }
+
+  async function readDir(
+    dir: string,
+    left: number,
+    mode: Mode,
+    ancestry: readonly string[],
+    recorded: ReadonlySet<string>,
+  ): Promise<void> {
     if (closed || ![...watchedRoots].some((root) => within(root, dir))) return;
     // attach the watcher before reading, so nothing that changes during the scan is lost
     depthLeft.set(dir, left);
     ancestries.set(dir, ancestry);
-    natives.ensure(dir);
+    if (physical(dir, ancestry)) natives.covered(dir, waitedFor(dir));
+    else natives.ensure(dir);
     const names = await readdir(dir).catch((error: NodeJS.ErrnoException) => {
       fail(error, dir);
       return undefined;
@@ -490,36 +564,25 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
 
     const seen = new Set<string>();
     const uninspectable = new Set<string>();
-    const failed = (error: NodeJS.ErrnoException, path: string): undefined => {
-      fail(error, path);
-      if (!VANISHED.has(error.code ?? "")) uninspectable.add(path);
-      return undefined;
-    };
     const covered = () => [...watchedRoots].some((root) => within(root, dir));
-    const examine = async (path: string): Promise<boolean> => {
-      const found = await inspect(path, left, mode, ancestry, failed);
-      if (!found) return false;
-      // an unlink listener may have unwatched the directory while the read was in flight
-      if (closed || !covered()) return true;
-      seen.add(path);
-      await visit(
-        path,
-        found.info,
-        found.descend,
-        mode,
-        [...ancestry, found.real],
-        found.info.isDirectory() ? found.real : found.link,
-      );
-      return true;
-    };
-    await Promise.all(names.map((name) => examine(join(dir, name))));
+    const examine = (path: string) =>
+      syncEntry(dir, basename(path), left, mode, ancestry, seen, uninspectable);
+    await Promise.all(
+      names.map((name) => syncEntry(dir, name, left, mode, ancestry, seen, uninspectable)),
+    );
     if (closed) return;
     const listed = new Set(names);
     // One name at a time would make a bulk removal wait for a round trip per file, and waiting for all of them before
     // removing any would leave the window open again, so each is removed as soon as its own check is done.
     await Promise.all(
       Array.from(children.get(dir) ?? [], async (path) => {
-        if (seen.has(path) || uninspectable.has(path) || watchedRoots.has(path)) return;
+        if (
+          seen.has(path) ||
+          uninspectable.has(path) ||
+          recorded.has(path) ||
+          watchedRoots.has(path)
+        )
+          return;
         if (!covered() || !children.get(dir)?.has(path)) return;
         // The siblings may have taken long: a file that was missing at its read can be back and reported since then. Not
         // a directory: one that is being deleted can still be read, and keeping it would keep its native watcher open.
@@ -538,6 +601,81 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     for (const path of denied) {
       if (dirname(path) === dir && !listed.has(basename(path))) denied.delete(path);
     }
+  }
+
+  /**
+   * Whether a tree watch reports `dir`: it lies below a root that has one, with no link on the way, so that its real
+   * path is the real path of that root followed by the same names. It is not reported behind a link.
+   */
+  function physical(dir: string, ancestry: readonly string[]): boolean {
+    return [...watchedRoots].some(
+      (root) =>
+        natives.hasTree(root) &&
+        within(root, dir) &&
+        join(realRoots.get(root) ?? root, relative(root, dir)) === ancestry.at(-1),
+    );
+  }
+
+  /** A watched file, or a path that does not exist yet, depends on the watch of `dir`. */
+  function waitedFor(dir: string): boolean {
+    return (
+      [...probes.values()].includes(dir) ||
+      [...watchedRoots].some((root) => kinds.get(root) === "file" && dirname(root) === dir)
+    );
+  }
+
+  /** What one name of `dir` is now: reported through `visit`, and recorded in `seen` unless it is gone. */
+  async function syncEntry(
+    dir: string,
+    name: string,
+    left: number,
+    mode: Mode,
+    ancestry: readonly string[],
+    seen: Set<string>,
+    uninspectable: Set<string>,
+  ): Promise<boolean> {
+    const path = join(dir, name);
+    const failed = (error: NodeJS.ErrnoException, at: string): undefined => {
+      fail(error, at);
+      if (!VANISHED.has(error.code ?? "")) uninspectable.add(at);
+      return undefined;
+    };
+    const found = await inspect(path, left, mode, ancestry, failed);
+    if (!found) return false;
+    // an unlink listener may have unwatched the directory while the read was in flight
+    if (closed || ![...watchedRoots].some((root) => within(root, dir))) return true;
+    seen.add(path);
+    await visit(
+      path,
+      found.info,
+      found.descend,
+      mode,
+      [...ancestry, found.real],
+      found.info.isDirectory() ? found.real : found.link,
+    );
+    return true;
+  }
+
+  /** Like `syncDir` for the one name that `fs.watch` reported, which is what keeps a huge directory from being read again. */
+  async function syncName(
+    dir: string,
+    name: string,
+    left: number,
+    mode: Mode,
+    ancestry: readonly string[],
+  ): Promise<void> {
+    if (closed || ![...watchedRoots].some((root) => within(root, dir))) return;
+    const path = join(dir, name);
+    const seen = new Set<string>();
+    const uninspectable = new Set<string>();
+    const record = () => {
+      for (const recorded of scanning.get(dir) ?? []) recorded.add(path);
+    };
+    record();
+    await syncEntry(dir, name, left, mode, ancestry, seen, uninspectable);
+    record();
+    if (closed || seen.has(path) || uninspectable.has(path) || watchedRoots.has(path)) return;
+    if (children.get(dir)?.has(path)) remove(path, true, undefined, mode !== "seed");
   }
 
   interface Found {
@@ -623,8 +761,17 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       link,
     };
     let previous = entries.get(path);
-    if (previous && (previous.dir !== next.dir || (next.dir && previous.link !== next.link))) {
+    if (
+      previous &&
+      (previous.dir !== next.dir ||
+        (next.dir && (previous.link !== next.link || replaced(previous, next))))
+    ) {
+      // a watch kept for a watched file below still follows the inode that was moved away, so it goes too
+      const stale = replaced(previous, next)
+        ? [...entries].filter(([key, entry]) => entry.dir && within(path, key)).map(([key]) => key)
+        : [];
       remove(path, true);
+      for (const key of stale) natives.release(key, true);
       previous = undefined;
     }
     if (!previous) {
@@ -729,8 +876,40 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     );
   }
 
-  function onNative(dir: string): void {
+  const isLarge = (dir: string): boolean => (children.get(dir)?.size ?? 0) > LARGE_DIRECTORY;
+
+  /** Reads `dir` whole once nothing has been reported for it for `AUDIT_QUIET_MS`, as an event without a name would. */
+  function audit(dir: string): void {
+    clearTimeout(audits.get(dir));
+    audits.set(
+      dir,
+      timeout(() => {
+        audits.delete(dir);
+        onNative(dir);
+      }, AUDIT_QUIET_MS),
+    );
+  }
+
+  function onNative(dir: string, name?: string): void {
     if (closed) return;
+    const left = depthLeft.get(dir);
+    const ancestry = ancestries.get(dir);
+    // a name that is a watched root is read with the root, and a root is named like itself when it is the one that
+    // went away, so any other name is a hint
+    if (
+      name &&
+      left !== undefined &&
+      ancestry &&
+      isLarge(dir) &&
+      !(watchedRoots.has(dir) && name === basename(dir)) &&
+      // a path that does not exist yet is waited for from its closest directory, and only the sync of its root moves that watch
+      ![...probes.values()].includes(dir) &&
+      !watchedRoots.has(join(dir, name))
+    ) {
+      void serial(`entry:${join(dir, name)}`, () => syncName(dir, name, left, "live", ancestry));
+      audit(dir);
+      return;
+    }
     for (const root of watchedRoots) {
       const kind = kinds.get(root);
       const affected =
@@ -741,8 +920,6 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
             : probes.get(root) === dir;
       if (affected) void serial(`root:${root}`, () => syncRoot(root, "live"));
     }
-    const left = depthLeft.get(dir);
-    const ancestry = ancestries.get(dir);
     if (left !== undefined && ancestry && !watchedRoots.has(dir))
       void serial(`dir:${dir}`, () => syncDir(dir, left, "live", ancestry));
   }

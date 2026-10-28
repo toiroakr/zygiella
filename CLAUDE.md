@@ -43,9 +43,24 @@ only a type). The parts that own their own state or have none are in their own f
 state), `snapshot.ts` (validating and seeding a snapshot, no state), `options.ts` (the defaults and validation of the options, no state), `native.ts` (the `fs.watch` handles and the unwatched
 set), `pending.ts` (add / change waiting to settle and unlinks held for `atomic`) and `types.ts`. The tests in `test/` run against the real file system.
 
-- Each directory that is descended into has its own `fs.watch`. Native events are not trusted for their type or
-  file name: every event re-reads the directory and diffs it against a snapshot (`entries`), and the diff
-  produces the reports. This absorbs coalesced and duplicated events on every platform.
+- Each directory that is descended into has its own `fs.watch`, except on macOS, where `natives.ensureTree` watches a
+  root and everything below it with one `recursive: true` watch (not with a finite `depth`). `hasTree` says whether a root has one, and `physical` in `index.ts` whether it reports a directory: a directory
+  behind a followed link is not under the tree physically, so it keeps its own watch (as does the directory of a
+  watched file or of a path that does not exist yet, see `waitedFor`). A tree watch that is not available or fails to open
+  falls back to one watch per directory. Native events are not trusted for their type: every event (except in a large directory, below) re-reads the
+  directory and diffs it against a snapshot (`entries`), and the diff produces the reports. This absorbs coalesced
+  and duplicated events on every platform. Only in a directory with more than `LARGE_DIRECTORY` entries is the name
+  of the event trusted (`syncName`), because the full read costs 0.2 to 1 s there; `audit` reads that directory whole
+  once `AUDIT_QUIET_MS` after its last event (through `onNative` without a name, so dependent file roots and
+  missing-path probes are synced too), which repairs an event the OS lost when others of that directory arrived.
+  `isLarge` counts tracked entries, so entries under `ignored` do not count. A full read and a named read of one
+  directory run in different queues; `scanning` makes the full read keep what a named read recorded meanwhile.
+- A native watcher error is retried by one re-sync of its directory (a read of everything for a tree watch), except `EMFILE` / `ENOSPC` and the fourth error
+  in a row without an event (`native.ts`), after which only `rescan()` lets that path be watched again (`retry`; releasing it with `unwatch()` forgets it too), and nothing below a root whose tree watch was given up is watched one by one until then (`blockedTrees`); the state is recorded before the `error` event is emitted; a re-watch after `EMFILE` on macOS made libuv rebuild its one stream for
+  every handle, and the process never reached `ready`.
+- `visit` treats a directory whose inode differs from the entry (both not 0) as another directory under the same name
+  and goes through `remove` and `visitNew`, so a directory moved away and replaced by another one reports
+  `unlinkDir` / `unlink` and then `addDir` / `add`. chokidar does the same (`replacedSinceObserved` in `tree.ts`).
 - `Mode` decides whether a diff reports: `quiet` (remember only, for `ignoreInitial`), `initial` (report at
   once, it is what `ready` waits for) and `live` (report after a quiet period, see below).
 - `add` and `change` reports wait for 50 ms of quiet per file, because Linux splits a write into truncate and
