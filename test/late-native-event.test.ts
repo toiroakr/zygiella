@@ -86,9 +86,22 @@ vi.mock("node:fs", async (importOriginal) => {
     ...actual,
     watch: ((...args: Parameters<typeof actual.watch>) => {
       const watcher = actual.watch(...args);
+      const inode = (): number | undefined => {
+        try {
+          return actual.statSync(String(args[0])).ino;
+        } catch {
+          return undefined;
+        }
+      };
+      const attached = inode();
+      // a watch of a deleted directory gets no event for a directory made again in its place
+      const alive = () => {
+        const now = inode();
+        return now === undefined || now === attached;
+      };
       const on = watcher.on.bind(watcher) as (event: string, listener: () => void) => unknown;
       watcher.on = ((event: string, listener: () => void) => {
-        if (event === "change") native.listeners.push(listener);
+        if (event === "change") native.listeners.push(() => alive() && listener());
         return event === "change" ? watcher : on(event, listener);
       }) as typeof watcher.on;
       return watcher;
