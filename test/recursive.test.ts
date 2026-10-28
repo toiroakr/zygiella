@@ -1,3 +1,4 @@
+import { renameSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm as removeOnce, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -240,6 +241,24 @@ describe.skipIf(!recursiveHere)("on macOS", () => {
     expect(native.closed).toContain(`dir:${join(dir, "sub")}`);
   });
 
+  test("a watched root that is replaced by another directory keeps a recursive watch", async () => {
+    const root = join(dir, "root");
+    await mkdir(join(root, "sub"), { recursive: true });
+    await mkdir(join(dir, "staging", "sub"), { recursive: true });
+    const { seen } = await start(root);
+    const trees = () => native.calls.filter((call) => call.recursive && call.path === root).length;
+    const before = trees();
+    // one after the other without a pause, so that the watcher cannot read in between
+    renameSync(root, join(dir, "root.old"));
+    renameSync(join(dir, "staging"), root);
+    await until(() => trees() > before);
+    expect(
+      native.calls.filter((call) => !call.recursive && call.path === join(root, "sub")),
+    ).toEqual([]);
+    const file = join(root, "sub", "a.txt");
+    await writeUntil(file, () => seen.some(([, path]) => path === file));
+  });
+
   test("a scan that a tree watch asked for does not let the other trees try again after a limit", async () => {
     const other = join(dir, "other");
     await mkdir(other);
@@ -412,6 +431,24 @@ describe("where recursive watching is not available", () => {
     await writeFile(join(dir, "d2", "inner", "a.txt"), "1");
     await until(() => seen.length > 0);
     expect(seen).toEqual([["add", join(dir, "d2", "inner", "a.txt")]]);
+  });
+
+  test("the watch of a replaced directory is closed and attached again although a watched file needs it", async () => {
+    native.unsupported = true;
+    const src = join(dir, "src");
+    await mkdir(src);
+    await writeFile(join(src, "a.ts"), "a");
+    await mkdir(join(dir, "staging"));
+    await writeFile(join(dir, "staging", "a.ts"), "b");
+    const { w } = await start(dir);
+    await w.add(join(src, "a.ts")).ready;
+    const opened = () => native.calls.filter((call) => call.path === src).length;
+    const before = opened();
+    // one after the other without a pause, so that the watcher cannot read in between
+    renameSync(src, join(dir, "src.old"));
+    renameSync(join(dir, "staging"), src);
+    await until(() => native.closed.includes(`dir:${src}`));
+    await until(() => opened() > before);
   });
 
   test("a failed recursive watch does not report an error by itself", async () => {

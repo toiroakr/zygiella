@@ -45,7 +45,8 @@ export interface NativeWatches {
   retry(): void;
   /** Closes the tree watch of `root`, which is no longer a watched root, whatever else still needs its directory. */
   releaseTree(root: string): void;
-  release(dir: string): void;
+  /** Closes the watch of `dir` unless something still needs it; `force` closes it either way, as when the directory was replaced. */
+  release(dir: string, force?: boolean): void;
   /** Directories (or tree roots) that are read but have no native watch, sorted. */
   unwatched(): string[];
   close(): void;
@@ -174,8 +175,8 @@ export function nativeWatches({
       if (blockedTrees.delete(root)) unwatched.delete(root);
     },
     hasTree: (root) => trees.has(root),
-    release(dir) {
-      if (needed(dir)) return;
+    release(dir, force = false) {
+      if (!force && needed(dir)) return;
       unwatched.delete(dir);
       rewatches.delete(dir);
       blocked.delete(dir);

@@ -116,8 +116,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   const realRoots = new Map<string, string>();
   let retryLimits = false;
   const audits = new Map<string, NodeJS.Timeout>();
-  /** For each directory a full read is going through: the paths a named entry read recorded meanwhile. */
-  const scanning = new Map<string, Set<string>>();
+  /** For each directory the full reads going through it, each with the paths a named entry read recorded meanwhile. */
+  const scanning = new Map<string, Set<Set<string>>>();
   /**
    * The reads of each path that have not returned yet. Marking them as stale beats comparing a count taken before and
    * after: a count has to be dropped with the path and then reads again the value that a read still in flight took.
@@ -433,6 +433,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     attachRoot(root);
     realRoots.set(root, real);
     await visit(root, info, 0, mode, [], real);
+    // a root that was replaced was removed by `visit`, which closed its tree watch
+    if (!closed && watchedRoots.has(root)) attachRoot(root);
     await syncDir(root, maxDepth, mode, [real]);
   }
 
@@ -529,11 +531,14 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   ): Promise<void> {
     // a named entry read that runs while this one lists the directory records entries the list is too early to contain
     const recorded = new Set<string>();
-    scanning.set(dir, recorded);
+    let reads = scanning.get(dir);
+    if (!reads) scanning.set(dir, (reads = new Set()));
+    reads.add(recorded);
     try {
       await readDir(dir, left, mode, ancestry, recorded);
     } finally {
-      scanning.delete(dir);
+      reads.delete(recorded);
+      if (!reads.size && scanning.get(dir) === reads) scanning.delete(dir);
     }
   }
 
@@ -663,9 +668,12 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     const path = join(dir, name);
     const seen = new Set<string>();
     const uninspectable = new Set<string>();
-    scanning.get(dir)?.add(path);
+    const record = () => {
+      for (const recorded of scanning.get(dir) ?? []) recorded.add(path);
+    };
+    record();
     await syncEntry(dir, name, left, mode, ancestry, seen, uninspectable);
-    scanning.get(dir)?.add(path);
+    record();
     if (closed || seen.has(path) || uninspectable.has(path) || watchedRoots.has(path)) return;
     if (children.get(dir)?.has(path)) remove(path, true, undefined, mode !== "seed");
   }
@@ -758,7 +766,12 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       (previous.dir !== next.dir ||
         (next.dir && (previous.link !== next.link || replaced(previous, next))))
     ) {
+      // a watch kept for a watched file below still follows the inode that was moved away, so it goes too
+      const stale = replaced(previous, next)
+        ? [...entries].filter(([key, entry]) => entry.dir && within(path, key)).map(([key]) => key)
+        : [];
       remove(path, true);
+      for (const key of stale) natives.release(key, true);
       previous = undefined;
     }
     if (!previous) {
