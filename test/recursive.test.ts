@@ -229,6 +229,17 @@ describe.skipIf(!recursiveHere)("on macOS", () => {
     await writeUntil(file, () => seen.some(([, path]) => path === file));
   });
 
+  test("the own watch of a directory that a watched file needed is closed when the file is unwatched and a tree covers the directory", async () => {
+    await mkdir(join(dir, "sub"));
+    const file = join(dir, "sub", "a.txt");
+    await writeFile(file, "0");
+    const { w } = await start(dir);
+    await w.add(file).ready;
+    expect(native.calls).toContainEqual({ path: join(dir, "sub"), recursive: false });
+    w.unwatch(file);
+    expect(native.closed).toContain(`dir:${join(dir, "sub")}`);
+  });
+
   test("a scan that a tree watch asked for does not let the other trees try again after a limit", async () => {
     const other = join(dir, "other");
     await mkdir(other);

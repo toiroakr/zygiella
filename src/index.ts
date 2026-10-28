@@ -215,7 +215,12 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     // a directory whose watch failed has no entry, so remove never released it
     for (const key of natives.unwatched()) if (within(path, key)) natives.release(key);
     const parent = dirname(path);
-    if (parent !== path) natives.release(parent);
+    if (parent !== path) {
+      natives.release(parent);
+      // release keeps a directory that is still tracked, but a tree may report it now that no file waits for it
+      const ancestry = ancestries.get(parent);
+      if (ancestry && physical(parent, ancestry)) natives.covered(parent, waitedFor(parent));
+    }
     // what stays tracked below the path may have been reported by the tree watch that is closed now, as the directory
     // behind a link that was a root of its own: it needs a watch of its own again unless another tree reports it. So
     // do the directories that a watched file or a path that does not exist yet is waited for through. Each is tried
