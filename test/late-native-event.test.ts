@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 // about a write is the test's choice and not the timing of FSEvents / inotify
 const native = vi.hoisted(() => ({
   listeners: [] as Array<() => void>,
+  live: new Set<unknown>(),
   sizesRead: [] as number[],
   linksRead: [] as string[],
   reads: [] as string[],
@@ -86,6 +87,12 @@ vi.mock("node:fs", async (importOriginal) => {
     ...actual,
     watch: ((...args: Parameters<typeof actual.watch>) => {
       const watcher = actual.watch(...args);
+      native.live.add(watcher);
+      const close = watcher.close.bind(watcher);
+      watcher.close = () => {
+        native.live.delete(watcher);
+        close();
+      };
       const inode = (): number | undefined => {
         try {
           return actual.statSync(String(args[0])).ino;
@@ -191,6 +198,7 @@ beforeEach(async () => {
   dir = await realpath(await mkdtemp(join(tmpdir(), "zygiella-")));
   watchers = [];
   native.listeners = [];
+  native.live.clear();
   native.sizesRead = [];
   native.linksRead = [];
   native.reads = [];
@@ -553,6 +561,21 @@ describe("a read of the file that completes after the change was reported", () =
     await until(() => seen.some(([event]) => event === "add"));
 
     expect(seen).toContainEqual(["add", join(root, "file")]);
+  });
+
+  test("does not leave the watch of a root open when the root is unwatched while its real path is being resolved", async () => {
+    const root = join(dir, "root");
+    await mkdir(root);
+    native.watched = root;
+    native.hold("realpath", false, root);
+    const w = watch(root, { ignoreInitial: true, atomic: false });
+    watchers.push(w);
+    await until(() => native.held);
+    w.unwatch(root);
+    native.open();
+    await new Promise<void>((r) => w.once("ready", () => r()));
+
+    expect(native.live.size).toBe(0);
   });
 
   test.skipIf(process.platform === "win32")(
