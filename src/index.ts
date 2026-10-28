@@ -314,7 +314,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     const previousProbe = probes.get(root);
     const previousParent = kinds.get(root) === "file" ? dirname(root) : undefined;
     if (mode !== "live") missingAtStart.delete(root);
-    const { info, link, unreadable } = await statRoot(root, mode);
+    const { info, link, real, unreadable } = await statRoot(root, mode);
     if (closed || !watchedRoots.has(root)) return;
     if (info && !info.isDirectory()) denied.delete(root);
 
@@ -327,7 +327,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     }
 
     if (!entries.has(root) && ignored.byStats?.(root, info)) watchSkipped(root, info);
-    else await scanRoot(root, info, link, mode);
+    else await scanRoot(root, info, link, real, mode);
     if (previousProbe) natives.release(previousProbe);
     if (previousParent) natives.release(previousParent);
   }
@@ -345,6 +345,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     root: string,
     info: Stats,
     link: string | undefined,
+    real: string,
     mode: Mode,
   ): Promise<void> {
     probes.delete(root);
@@ -356,7 +357,6 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     }
     kinds.set(root, "dir");
     natives.ensure(root);
-    const real = await realpath(root).catch(() => root);
     await visit(root, info, 0, mode, [], real);
     await syncDir(root, maxDepth, mode, [real]);
   }
@@ -364,7 +364,12 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   async function statRoot(
     root: string,
     mode: Mode,
-  ): Promise<{ info: Stats | undefined; link: string | undefined; unreadable: boolean }> {
+  ): Promise<{
+    info: Stats | undefined;
+    link: string | undefined;
+    real: string;
+    unreadable: boolean;
+  }> {
     let unreadable = false;
     const read = await unsettled(root, async () => {
       const info = await followStat(root);
@@ -372,7 +377,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
         !followSymlinks && info.isSymbolicLink()
           ? await readlink(root).catch(() => undefined)
           : undefined;
-      return { info, link };
+      const real = info.isDirectory() ? await realpath(root).catch(() => root) : root;
+      return { info, link, real };
     }).catch((error: NodeJS.ErrnoException) => {
       fail(error, root);
       unreadable = !VANISHED.has(error.code ?? "");
@@ -380,7 +386,12 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       return undefined;
     });
     const gone = !!read && !followSymlinks && read.info.isSymbolicLink() && read.link === undefined;
-    return { info: gone ? undefined : read?.info, link: read?.link, unreadable };
+    return {
+      info: gone ? undefined : read?.info,
+      link: read?.link,
+      real: read?.real ?? root,
+      unreadable,
+    };
   }
 
   /** Watches the nearest directory that exists, so that the root is seen when it is created. */
