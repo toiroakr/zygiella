@@ -79,7 +79,8 @@ export function pendingEvents({
       const job: Settling = {
         event: prior?.event === "add" ? "add" : event,
         before: prior ? prior.before : (before ?? held),
-        renamedFrom: prior?.renamedFrom ?? renamedFrom,
+        // a file that changes while its add waits is not the file that was paired
+        renamedFrom: prior ? undefined : renamedFrom,
       };
       settling.set(path, job);
       if (!settle) {

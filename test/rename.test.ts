@@ -91,6 +91,33 @@ describe("a file that is moved", () => {
   });
 });
 
+describe("a file that is moved again before its add is reported", () => {
+  const slow = { awaitWriteFinish: { stabilityThreshold: 600, pollInterval: 20 } };
+
+  test("names the first path, not the intermediate one", async () => {
+    await writeFile(join(dir, "a.txt"), "hello");
+    const seen = await start(slow);
+    await rename(join(dir, "a.txt"), join(dir, "b.txt"));
+    await new Promise((r) => setTimeout(r, 150));
+    await rename(join(dir, "b.txt"), join(dir, "c.txt"));
+    await until(() => named(seen, "add").length > 0, 5000);
+    expect(named(seen, "add")).toEqual([
+      ["add", join(dir, "c.txt"), { renamedFrom: join(dir, "a.txt") }],
+    ]);
+  });
+
+  test("names no path when another file replaces the destination meanwhile", async () => {
+    await writeFile(join(dir, "a.txt"), "hello");
+    const seen = await start(slow);
+    await rename(join(dir, "a.txt"), join(dir, "b.txt"));
+    await new Promise((r) => setTimeout(r, 150));
+    await writeFile(join(dir, ".next-file"), "something else");
+    await rename(join(dir, ".next-file"), join(dir, "b.txt"));
+    await until(() => named(seen, "add").length > 0, 5000);
+    expect(named(seen, "add")).toEqual([["add", join(dir, "b.txt")]]);
+  });
+});
+
 describe("a file that only looks moved", () => {
   test("does not name an old path for a different file created after a delete", async () => {
     await writeFile(join(dir, "a.txt"), "1");

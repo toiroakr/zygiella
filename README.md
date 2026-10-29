@@ -312,12 +312,15 @@ await watcher.close();
   (`ERR_FEATURE_UNAVAILABLE_ON_PLATFORM`) or cannot be set up, every directory is watched on its own as above.
 - A file that is moved (`mv a.txt dir/b.txt`) is still reported as `unlink` of the old path and `add` of the new one,
   and the `add` carries `{ renamedFrom: '/work/a.txt' }` as its second argument (also the third of `all`). The two are
-  paired when a file that disappeared and a file that appeared within 1 s have the same inode, size and mtime; the inode
-  alone is not used, because a file system can give a freed inode to the next file it creates. It works in either
-  order and across directories, and for the files below a moved directory (the `addDir` carries nothing). No pairing
-  is made, and `renamedFrom` is absent, when the file system reports inode 0, when the move crosses file systems (the
-  inode changes), when the file is written during the move, or when the two halves are noticed more than 1 s apart.
-  A file that is replaced in place (`atomic`) stays one `change`.
+  paired when a file that disappeared and a file that appeared within 1 s have the same device, inode, size and mtime;
+  the inode alone is not used, because a file system can give a freed inode to the next file it creates, and inode
+  numbers repeat across devices. It works in either order, across directories, for a file moved again before its `add`
+  is reported (`a`, then `b`, then `c`: the `add` of `c` names `a`), and for the files below a moved directory (the
+  `addDir` carries nothing). It is best effort, and `renamedFrom` is absent when the file system reports inode 0, when
+  the move crosses file systems (the inode changes), when the file is written, or replaced by another file, before
+  its `add` is reported, when the two halves are noticed more than 1 s apart, when the `add` was already reported by
+  the time the removal is noticed (a directory that takes longer than 50 ms to read), and for what is reported before
+  `ready` after `since`, which has no device to compare. A file that is replaced in place (`atomic`) stays one `change`.
 - A symbolic link to a directory is reported as `addDir` and descended into, and what is below it is reported under
   the link's path. The real path of every directory on the way down is remembered, and a link to one of them is
   reported but not descended into, so a link back to an ancestor does not loop. Pointing a followed link at another

@@ -65,6 +65,8 @@ export interface SnapshotEntry {
   mtimeMs: number;
   size: number;
   ino: number;
+  /** The device of `ino`, which is only unique within one. Unknown for an entry seeded from a snapshot. */
+  dev?: number;
   /** Where a link points when it is watched as itself; for a directory, its real path. */
   link?: string;
 }
@@ -82,7 +84,7 @@ export interface ReadyResult {
 
 /** The second argument of `add` and `all` when the file is one that was moved from another path. */
 export interface AddDetails {
-  /** Absolute path the file was at, which is reported as `unlink` too. Found by inode, size and mtime within a second. */
+  /** Absolute path the file was at, which is reported as `unlink` too. Found by device, inode, size and mtime within a second. */
   renamedFrom: string;
 }
 
@@ -102,6 +104,8 @@ export interface Entry {
   mtimeMs: number;
   size: number;
   ino: number;
+  /** The device of `ino`, which is only unique within one. Unknown for an entry seeded from a snapshot. */
+  dev?: number;
   /** Where a link points when it is watched as itself; for a directory, its real path. */
   link?: string;
 }

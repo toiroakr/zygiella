@@ -762,6 +762,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       mtimeMs: info.mtimeMs,
       size: info.size,
       ino: info.ino,
+      dev: info.dev,
       link,
     };
     let previous = entries.get(path);
@@ -799,7 +800,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     ancestry: readonly string[],
   ): Promise<void> {
     if (next.dir) pending.flush(path);
-    const from = mode === "quiet" ? undefined : moves.added(path, next);
+    const from = mode === "live" ? moves.added(path, next) : undefined;
     // an unlink listener may have closed the watcher: the entry would be in the baseline without being reported
     if (closed) return;
     setEntry(path, next);
@@ -847,8 +848,15 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
         ancestries.delete(key);
         natives.release(key);
       }
-      // an add that never settled was never reported, so there is nothing to take back
-      if (!report || job?.event === "add") continue;
+      if (!report) continue;
+      // an add that never settled was never reported, so there is nothing to take back; one that was paired goes on
+      // from the path it came from, so that the next add of the file names it
+      if (job?.event === "add") {
+        const origin = job.renamedFrom;
+        const to = origin && !entry.dir ? moves.removed(origin, entry) : undefined;
+        if (origin && to) pending.renamed(to, origin);
+        continue;
+      }
       if (entry.dir) {
         dispatch("unlinkDir", key);
         continue;
