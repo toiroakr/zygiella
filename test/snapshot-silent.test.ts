@@ -41,9 +41,14 @@ test("a write that settles after the last rescan() is the state the snapshot rec
   const seen: string[] = [];
   watcher.on("change", (path) => seen.push(path));
   await watcher.ready;
-  await writeFile(join(dir, "a.txt"), "22");
+  // replaced in one step: writeFile truncates and writes in two, and a 100 ms stall between them would settle the empty file
+  const replace = async (content: string) => {
+    await writeFile(join(dir, ".next-file"), content);
+    await rename(join(dir, ".next-file"), join(dir, "a.txt"));
+  };
+  await replace("22");
   await watcher.rescan();
-  await writeFile(join(dir, "a.txt"), "333");
+  await replace("333");
   await until(() => seen.length > 0);
   const entry = watcher.snapshot().entries.find((e) => e.path === join(dir, "a.txt"));
   expect(entry?.size).toBe(3);
