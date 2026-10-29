@@ -353,9 +353,10 @@ await watcher.close();
 - `change` is the only event for a modification, and listeners get the path only (chokidar also passes `stats`). A
   `touch` that changes only the modification time is reported as `change`; a `chmod` that changes only the
   permissions is not reported. Nothing tells a content change from a time change.
-- There is no rename event. `mv a.txt b.txt` is reported as `add` of `b.txt` and then, 100 ms later (the default
-  `atomic` window, which holds back the `unlink`), as `unlink` of `a.txt`; with `atomic: false` it is `unlink` of
-  `a.txt` and then `add` of `b.txt`. Pairing the two is left to the caller.
+- There is no rename event. `mv a.txt b.txt` is reported as `add` of `b.txt` and `unlink` of `a.txt`, two events
+  with their own delays: the `add` waits for 50 ms of quiet (or for `awaitWriteFinish`), and the `unlink` is held back for the `atomic`
+  window (100 ms by default) that starts when the removal is noticed. Which one arrives first is not promised, so
+  pairing the two is left to the caller.
 
 ## License
 

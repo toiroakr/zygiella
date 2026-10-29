@@ -27,6 +27,8 @@ async function until(predicate: () => boolean, ms = 3000): Promise<void> {
 
 async function start() {
   await writeFile(join(dir, "a.txt"), "hello");
+  // the umask of the process would otherwise decide the mode the permission test starts from
+  if (process.platform !== "win32") await chmod(join(dir, "a.txt"), 0o644);
   watcher = watch(dir, { ignoreInitial: true });
   const seen: unknown[][] = [];
   watcher.on("all", (...args) => seen.push(args));
