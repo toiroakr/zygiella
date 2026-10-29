@@ -2,12 +2,14 @@ import { EventEmitter } from "node:events";
 import type { Stats } from "node:fs";
 import { lstat, readdir, readlink, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, relative, sep } from "node:path";
+import { trackMoves } from "./moves.ts";
 import { pendingEvents } from "./pending.ts";
 import { DENIED, VANISHED, nativeWatches, nearestDirectory } from "./native.ts";
 import { recorded, seedEntries, toSnapshot } from "./snapshot.ts";
 import { list, within } from "./match.ts";
 import { resolveOptions } from "./options.ts";
 import type {
+  AddDetails,
   Entry,
   Events,
   ReadyResult,
@@ -18,6 +20,7 @@ import type {
 } from "./types.ts";
 
 export type {
+  AddDetails,
   Ignored,
   ReadyResult,
   Snapshot,
@@ -136,6 +139,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     },
     onError: fail,
   });
+  const moves = trackMoves();
   const pending = pendingEvents({
     atomic: atomicMs,
     settle,
@@ -795,14 +799,16 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     ancestry: readonly string[],
   ): Promise<void> {
     if (next.dir) pending.flush(path);
+    const from = mode === "quiet" ? undefined : moves.added(path, next);
     // an unlink listener may have closed the watcher: the entry would be in the baseline without being reported
     if (closed) return;
     setEntry(path, next);
     if (next.dir) {
       if (mode !== "quiet") dispatch("addDir", path);
       if (left > 0) await syncDir(path, left - 1, mode, ancestry);
-    } else if (mode === "live" || pending.isHeld(path)) pending.announce("add", path);
-    else if (mode !== "quiet") dispatch("add", path);
+    } else if (mode === "live" || pending.isHeld(path))
+      pending.announce("add", path, undefined, from);
+    else if (mode !== "quiet") dispatch("add", path, from);
   }
 
   function setEntry(path: string, entry: Entry): void {
@@ -843,18 +849,23 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       }
       // an add that never settled was never reported, so there is nothing to take back
       if (!report || job?.event === "add") continue;
-      if (entry.dir) dispatch("unlinkDir", key);
-      else if (defer && pending.holdsUnlinks && key === path)
-        pending.hold(key, job?.before ?? entry);
+      if (entry.dir) {
+        dispatch("unlinkDir", key);
+        continue;
+      }
+      const to = moves.removed(key, entry);
+      if (to) pending.renamed(to, key);
+      if (defer && pending.holdsUnlinks && key === path) pending.hold(key, job?.before ?? entry);
       else dispatch("unlink", key);
     }
   }
 
-  function dispatch(event: WatchEvent, path: string): void {
+  function dispatch(event: WatchEvent, path: string, renamedFrom?: string): void {
     if (closed) return;
+    const details: AddDetails[] = renamedFrom === undefined ? [] : [{ renamedFrom }];
     // `emit` forwards the arguments as given, and the events map types them per event
-    (emitter.emit as (event: string, ...args: unknown[]) => boolean)(event, path);
-    if (!closed) emitter.emit("all", event, path);
+    (emitter.emit as (event: string, ...args: unknown[]) => boolean)(event, path, ...details);
+    if (!closed) emitter.emit("all", event, path, ...details);
   }
 
   /** A path that vanished is a race with whoever removed it. A permission error is reported once per path until the path reads again. */

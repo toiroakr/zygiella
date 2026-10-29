@@ -9,6 +9,8 @@ interface Settling {
   event: "add" | "change";
   /** What was reported last, for a change that is still waiting: that is what `snapshot()` records. */
   before?: Entry;
+  /** Where the file of an add that is still waiting was moved from. */
+  renamedFrom?: string;
   timer?: NodeJS.Timeout;
 }
 
@@ -19,7 +21,7 @@ export interface PendingOptions {
   settle: { stabilityThreshold: number; pollInterval: number } | undefined;
   followSymlinks: boolean;
   timeout: (fn: () => void, ms: number) => NodeJS.Timeout;
-  dispatch: (event: WatchEvent, path: string) => void;
+  dispatch: (event: WatchEvent, path: string, renamedFrom?: string) => void;
   stat: (path: string) => Promise<Stats>;
   /** The file settled at this size and mtime, which the entry may not know yet. */
   settled: (path: string, info: Stats, link: string | undefined) => void;
@@ -28,7 +30,9 @@ export interface PendingOptions {
 /** Reports that are not made yet: an add / change waiting to settle, and an unlink held back for `atomic`. */
 export interface Pending {
   readonly holdsUnlinks: boolean;
-  announce(event: "add" | "change", path: string, before?: Entry): void;
+  announce(event: "add" | "change", path: string, before?: Entry, renamedFrom?: string): void;
+  /** The add waiting for `path` is the file that was at `from`. False when no add is waiting. */
+  renamed(path: string, from: string): boolean;
   /** An unlink held back: it is not reported yet, so `entry` is still what was last reported. */
   hold(path: string, entry: Entry): void;
   isHeld(path: string): boolean;
@@ -67,7 +71,7 @@ export function pendingEvents({
 
   return {
     holdsUnlinks: atomic > 0,
-    announce(event, path, before) {
+    announce(event, path, before, renamedFrom) {
       const held = takeHeld(path);
       if (held) event = "change";
       const prior = settling.get(path);
@@ -75,6 +79,7 @@ export function pendingEvents({
       const job: Settling = {
         event: prior?.event === "add" ? "add" : event,
         before: prior ? prior.before : (before ?? held),
+        renamedFrom: prior?.renamedFrom ?? renamedFrom,
       };
       settling.set(path, job);
       if (!settle) {
@@ -89,7 +94,7 @@ export function pendingEvents({
           settling.delete(path);
           // a native event for the write that finished meanwhile may arrive later and must not report it again
           if (info) settled(path, info, link);
-          dispatch(job.event, path);
+          dispatch(job.event, path, job.event === "add" ? job.renamedFrom : undefined);
         }, QUIET_MS);
         return;
       }
@@ -111,12 +116,18 @@ export function pendingEvents({
         } else if (Date.now() - since >= settle.stabilityThreshold) {
           settling.delete(path);
           settled(path, info, link);
-          dispatch(job.event, path);
+          dispatch(job.event, path, job.event === "add" ? job.renamedFrom : undefined);
           return;
         }
         job.timer = timeout(poll, settle.pollInterval);
       };
       job.timer = timeout(poll, settle.pollInterval);
+    },
+    renamed(path, from) {
+      const job = settling.get(path);
+      if (job?.event !== "add") return false;
+      job.renamedFrom = from;
+      return true;
     },
     hold(path, entry) {
       const timer = timeout(() => {

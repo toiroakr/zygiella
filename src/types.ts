@@ -80,13 +80,19 @@ export interface ReadyResult {
   missing: string[];
 }
 
+/** The second argument of `add` and `all` when the file is one that was moved from another path. */
+export interface AddDetails {
+  /** Absolute path the file was at, which is reported as `unlink` too. Found by inode, size and mtime within a second. */
+  renamedFrom: string;
+}
+
 export interface Events {
-  add: [path: string];
+  add: [path: string, details?: AddDetails];
   addDir: [path: string];
   change: [path: string];
   unlink: [path: string];
   unlinkDir: [path: string];
-  all: [event: WatchEvent, path: string];
+  all: [event: WatchEvent, path: string, details?: AddDetails];
   ready: [result: ReadyResult];
   error: [error: Error];
 }
