@@ -22,13 +22,14 @@ export interface Moves {
 }
 
 export function trackMoves(now: () => number = Date.now): Moves {
-  const gone = new Map<number, Seen>();
-  const fresh = new Map<number, Seen>();
+  const gone = new Map<string, Seen>();
+  const fresh = new Map<string, Seen>();
 
-  const meet = (own: Map<number, Seen>, other: Map<number, Seen>, path: string, entry: Entry) => {
+  const meet = (own: Map<string, Seen>, other: Map<string, Seen>, path: string, entry: Entry) => {
     if (entry.dir || entry.ino === 0 || entry.dev === undefined) return undefined;
     const at = now();
-    const candidate = other.get(entry.ino);
+    const key = `${entry.dev}:${entry.ino}`;
+    const candidate = other.get(key);
     if (
       candidate &&
       at - candidate.at <= WINDOW_MS &&
@@ -37,17 +38,17 @@ export function trackMoves(now: () => number = Date.now): Moves {
       candidate.entry.size === entry.size &&
       candidate.entry.mtimeMs === entry.mtimeMs
     ) {
-      other.delete(entry.ino);
-      own.delete(entry.ino);
+      other.delete(key);
+      own.delete(key);
       return candidate.path;
     }
     // a Map iterates in insertion order, which is the order of `at`, so the expired ones are all at the front
-    for (const [ino, seen] of own) {
+    for (const [expired, seen] of own) {
       if (at - seen.at <= WINDOW_MS) break;
-      own.delete(ino);
+      own.delete(expired);
     }
-    own.delete(entry.ino);
-    own.set(entry.ino, { path, entry, at });
+    own.delete(key);
+    own.set(key, { path, entry, at });
     return undefined;
   };
 

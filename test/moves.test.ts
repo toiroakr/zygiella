@@ -25,6 +25,14 @@ test("the same inode number on another device is another file", () => {
   expect(moves.added("/mnt/b", file(7, { dev: 2 }))).toBeUndefined();
 });
 
+test("records of the same inode number on two devices do not overwrite each other", () => {
+  const moves = trackMoves();
+  moves.removed("/w/a", file(7, { dev: 1 }));
+  moves.removed("/mnt/x", file(7, { dev: 2 }));
+  expect(moves.added("/w/b", file(7, { dev: 1 }))).toBe("/w/a");
+  expect(moves.added("/mnt/y", file(7, { dev: 2 }))).toBe("/mnt/x");
+});
+
 test("a file whose device is not known is never paired", () => {
   const moves = trackMoves();
   moves.removed("/w/a", file(7, { dev: undefined }));

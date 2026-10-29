@@ -91,6 +91,22 @@ describe("a file that is moved", () => {
   });
 });
 
+describe("a file that was there when the watcher started from a snapshot", () => {
+  test("names the old path when it is moved after ready", async () => {
+    await writeFile(join(dir, "a.txt"), "hello");
+    const first = watch(dir, { ignoreInitial: true });
+    await first.ready;
+    const since = first.snapshot();
+    await first.close();
+    const seen = await start({ since });
+    await rename(join(dir, "a.txt"), join(dir, "b.txt"));
+    await until(() => named(seen, "add").length > 0 && named(seen, "unlink").length > 0);
+    expect(named(seen, "add")).toEqual([
+      ["add", join(dir, "b.txt"), { renamedFrom: join(dir, "a.txt") }],
+    ]);
+  });
+});
+
 describe("a file that is moved again before its add is reported", () => {
   const slow = { awaitWriteFinish: { stabilityThreshold: 600, pollInterval: 20 } };
 

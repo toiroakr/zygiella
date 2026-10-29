@@ -789,6 +789,9 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       setEntry(path, next);
       if (mode === "seed") dispatch("change", path);
       else if (mode !== "quiet") pending.announce("change", path, previous);
+    } else if (!next.dir && previous.dev === undefined) {
+      // an entry seeded from a snapshot has no device, and a move of it could never be paired without one
+      entries.set(path, { ...previous, dev: next.dev });
     }
   }
 
