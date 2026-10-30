@@ -129,7 +129,19 @@ export function pendingEvents({
         }
         job.leading = true;
         void (async () => {
-          await after?.(path);
+          const waited = after?.(path);
+          // a read that does not come back (a slow or stuck directory) must not hold a report longer than the quiet period did
+          if (waited) {
+            await new Promise<void>((resolve) => {
+              job.timer = timeout(resolve, QUIET_MS);
+              void waited.then(
+                () => resolve(),
+                () => resolve(),
+              );
+            });
+            clearTimeout(job.timer);
+            job.timer = undefined;
+          }
           if (settling.get(path) !== job) return;
           const { info, link } = await read();
           if (settling.get(path) !== job) return;

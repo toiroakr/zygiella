@@ -67,8 +67,8 @@ set), `moves.ts` (pairs a removed and an added file by device, inode, size and m
   @parcel/watcher report the first change at once. A file that is still empty is held for `EMPTY_HOLD_MS` (10 ms),
   because Linux splits a write into truncate and write, and a native event for it in that time reports it at once. A path
   reported less than `QUIET_MS` (50 ms) ago (`reportedRecently`) waits for 50 ms of quiet instead, so a write that comes as
-  several events is reported once more at the end. The first report of an `add` also waits for the directory reads that are going on when it is
-  announced (`after`, `reading` in `index.ts`), because a move is paired from the add and the removal, which the same read
+  several events is reported once more at the end. The first report of an `add` also waits, for `QUIET_MS` at most so that a read that does not come back cannot hold it, for the directory reads
+  that are going on when it is announced (`after`, `reading` in `index.ts`), because a move is paired from the add and the removal, which the same read
   or the read of the other directory makes, so `renamedFrom` is still known; a large directory does not wait, because its
   entries come from named reads. With
   `awaitWriteFinish` they wait for a stable size and mtime instead.

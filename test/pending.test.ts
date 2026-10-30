@@ -118,4 +118,60 @@ describe("reporting add and change without waiting for a quiet period", () => {
     await flush();
     expect(reported).toEqual([]);
   });
+
+  test("the first report of an add waits no longer than the quiet period for what `after` returns", async () => {
+    const timers: Array<{ ms: number; fn: () => void }> = [];
+    const reported: string[] = [];
+    const pending = pendingEvents({
+      atomic: 0,
+      settle: undefined,
+      followSymlinks: true,
+      timeout: (fn, ms) => {
+        timers.push({ ms, fn });
+        return {} as NodeJS.Timeout;
+      },
+      dispatch: (event) => reported.push(event),
+      stat: async () => ({ size: 3, isSymbolicLink: () => false }) as Stats,
+      settled: () => {},
+      after: () => new Promise(() => {}),
+    });
+    pending.announce("add", "/d/a.txt");
+    await flush();
+    expect(reported).toEqual([]);
+    expect(timers.map((t) => t.ms)).toEqual([50]);
+    timers[0]!.fn();
+    await flush();
+    expect(reported).toEqual(["add"]);
+  });
+
+  test("a file created again after its removal is reported at once, not after the quiet period", async () => {
+    const { pending, timers, reported } = harness(() => 3);
+    pending.announce("add", "/d/a.txt");
+    await flush();
+    pending.cancel("/d/a.txt");
+    pending.announce("add", "/d/a.txt");
+    await flush();
+    expect(reported).toEqual([
+      ["add", "/d/a.txt"],
+      ["add", "/d/a.txt"],
+    ]);
+    expect(timers.map((t) => t.ms)).toEqual([50, 50]);
+  });
+
+  test("an announce during the first read drops the path the add was paired with", async () => {
+    const renamedFrom: Array<string | undefined> = [];
+    const pending = pendingEvents({
+      atomic: 0,
+      settle: undefined,
+      followSymlinks: true,
+      timeout: () => ({}) as NodeJS.Timeout,
+      dispatch: (_event, _path, from) => renamedFrom.push(from),
+      stat: async () => ({ size: 3, isSymbolicLink: () => false }) as Stats,
+      settled: () => {},
+    });
+    pending.announce("add", "/d/b.txt", undefined, "/d/a.txt");
+    pending.announce("change", "/d/b.txt");
+    await flush();
+    expect(renamedFrom).toEqual([undefined]);
+  });
 });
