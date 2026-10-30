@@ -174,4 +174,50 @@ describe("reporting add and change without waiting for a quiet period", () => {
     await flush();
     expect(renamedFrom).toEqual([undefined]);
   });
+
+  test("a write announced while the first read is in flight is read again before the report", async () => {
+    const reported: string[] = [];
+    const settledSizes: number[] = [];
+    let calls = 0;
+    let release!: () => void;
+    const pending = pendingEvents({
+      atomic: 0,
+      settle: undefined,
+      followSymlinks: true,
+      timeout: () => ({}) as NodeJS.Timeout,
+      dispatch: (event) => reported.push(event),
+      stat: () => {
+        calls++;
+        if (calls > 1) return Promise.resolve({ size: 5, isSymbolicLink: () => false } as Stats);
+        return new Promise<Stats>((resolve) => {
+          release = () => resolve({ size: 1, isSymbolicLink: () => false } as Stats);
+        });
+      },
+      settled: (_path, info) => settledSizes.push(info.size),
+    });
+    pending.announce("add", "/d/a.txt");
+    await flush();
+    pending.announce("change", "/d/a.txt");
+    release();
+    await flush();
+    expect(settledSizes).toEqual([5]);
+    expect(reported).toEqual(["add"]);
+  });
+
+  test("a change does not wait for what `after` returns", async () => {
+    const reported: string[] = [];
+    const pending = pendingEvents({
+      atomic: 0,
+      settle: undefined,
+      followSymlinks: true,
+      timeout: () => ({}) as NodeJS.Timeout,
+      dispatch: (event) => reported.push(event),
+      stat: async () => ({ size: 3, isSymbolicLink: () => false }) as Stats,
+      settled: () => {},
+      after: () => new Promise(() => {}),
+    });
+    pending.announce("change", "/d/a.txt");
+    await flush();
+    expect(reported).toEqual(["change"]);
+  });
 });

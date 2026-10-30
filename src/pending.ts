@@ -15,6 +15,8 @@ interface Settling {
   renamedFrom?: string;
   /** Still waiting for the first read of the file, which reports at once unless the file is empty. */
   leading?: boolean;
+  /** An announce came while the first read was in flight, so that read may be older than the write it announced. */
+  dirty?: boolean;
   timer?: NodeJS.Timeout;
 }
 
@@ -85,9 +87,9 @@ export function pendingEvents({
       if (held) event = "change";
       const prior = settling.get(path);
       if (prior?.leading && !settle) {
-        // the first read has not come back yet and will see the newest state itself
         if (event === "add") prior.event = "add";
         prior.renamedFrom = undefined;
+        prior.dirty = true;
         return;
       }
       clearTimeout(prior?.timer);
@@ -129,7 +131,8 @@ export function pendingEvents({
         }
         job.leading = true;
         void (async () => {
-          const waited = after?.(path);
+          // only an add is paired with a removal, so a change has nothing to wait for
+          const waited = job.event === "add" ? after?.(path) : undefined;
           // a read that does not come back (a slow or stuck directory) must not hold a report longer than the quiet period did
           if (waited) {
             await new Promise<void>((resolve) => {
@@ -143,8 +146,14 @@ export function pendingEvents({
             job.timer = undefined;
           }
           if (settling.get(path) !== job) return;
-          const { info, link } = await read();
-          if (settling.get(path) !== job) return;
+          // a read that was in flight when another announce came may have seen the file before that write
+          let result: Awaited<ReturnType<typeof read>>;
+          do {
+            job.dirty = false;
+            result = await read();
+            if (settling.get(path) !== job) return;
+          } while (job.dirty);
+          const { info, link } = result;
           job.leading = false;
           if (info && info.size > 0) report(info, link);
           // a file that is gone may be taken back by the removal that is being read, so it gets the longer wait
