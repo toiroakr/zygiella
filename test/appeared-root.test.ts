@@ -8,8 +8,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 // of the directory above it, and everything else, is real
 const native = vi.hoisted(() => ({
   target: "",
-  // runs after the first listing of the root was read and before it is returned, so the file is not in that listing
-  afterFirstListing: undefined as (() => Promise<void>) | undefined,
+  // runs after the first listing of a directory was read and before it is returned, so the file is not in that listing
+  afterFirstListing: new Map<string, () => Promise<void>>(),
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -33,10 +33,10 @@ vi.mock("node:fs/promises", async (importOriginal) => {
         path,
         ...rest,
       );
-      if (native.target && String(path) === native.target) {
-        const hook = native.afterFirstListing;
-        native.afterFirstListing = undefined;
-        await hook?.();
+      const hook = native.afterFirstListing.get(String(path));
+      if (hook) {
+        native.afterFirstListing.delete(String(path));
+        await hook();
       }
       return names;
     }) as typeof actual.readdir,
@@ -56,7 +56,7 @@ beforeEach(async () => {
   dir = await realpath(await mkdtemp(join(tmpdir(), "zygiella-")));
   watchers = [];
   native.target = "";
-  native.afterFirstListing = undefined;
+  native.afterFirstListing.clear();
 });
 
 afterEach(async () => {
@@ -81,9 +81,24 @@ describe("a root that did not exist when the watcher started", () => {
     const seen: Array<[string, string]> = [];
     w.on("all", (event, path) => seen.push([event, path]));
     await new Promise<void>((r) => w.once("ready", () => r()));
-    native.afterFirstListing = () => writeFile(join(target, "a.txt"), "1");
+    native.afterFirstListing.set(target, () => writeFile(join(target, "a.txt"), "1"));
     await mkdir(target);
     await until(() => seen.some(([event]) => event === "add"));
     expect(seen.at(-1)).toEqual(["add", join(target, "a.txt")]);
+  });
+
+  test("reports a file written in a subdirectory after the first listing of that subdirectory", async () => {
+    const target = join(dir, "later");
+    const sub = join(target, "sub");
+    native.target = target;
+    const w = watch(target, { ignoreInitial: true });
+    watchers.push(w);
+    const seen: Array<[string, string]> = [];
+    w.on("all", (event, path) => seen.push([event, path]));
+    await new Promise<void>((r) => w.once("ready", () => r()));
+    native.afterFirstListing.set(sub, () => writeFile(join(sub, "a.txt"), "1"));
+    await mkdir(sub, { recursive: true });
+    await until(() => seen.some(([event]) => event === "add"));
+    expect(seen.at(-1)).toEqual(["add", join(sub, "a.txt")]);
   });
 });

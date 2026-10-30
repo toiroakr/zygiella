@@ -298,13 +298,17 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     // read that a tree watch asks for after it lost track
     if (retryLimits) natives.retry();
     retryLimits = false;
-    await Promise.all(
-      [...watchedRoots].map((root) => serial(`root:${root}`, () => syncRoot(root, "live"))),
-    );
+    await readAgain([...watchedRoots]);
+  }
+
+  /** Reads the roots and every directory below them that was descended into, again. */
+  async function readAgain(roots: readonly string[]): Promise<void> {
+    await Promise.all(roots.map((root) => serial(`root:${root}`, () => syncRoot(root, "live"))));
     // a read can drop a directory or change what lies below it, so shallow directories go first and each one is
     // looked up again when its turn comes
     const levels = new Map<number, string[]>();
     for (const dir of depthLeft.keys()) {
+      if (!roots.some((root) => within(root, dir))) continue;
       const depth = dir.split(sep).length;
       const level = levels.get(depth);
       if (level) level.push(dir);
@@ -423,8 +427,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   function readAgainOnceDelivering(root: string): void {
     const timer = timeout(() => {
       rereads.delete(timer);
-      if (!closed && watchedRoots.has(root))
-        void serial(`root:${root}`, () => syncRoot(root, "live"));
+      if (!closed && watchedRoots.has(root)) void readAgain([root]);
     }, READY_SETTLE_MS);
     rereads.add(timer);
   }

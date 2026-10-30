@@ -1,6 +1,6 @@
 import type { Stats } from "node:fs";
 import { describe, expect, test } from "vitest";
-import { pendingEvents } from "../src/pending.ts";
+import { pendingEvents, type Pending } from "../src/pending.ts";
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -219,5 +219,34 @@ describe("reporting add and change without waiting for a quiet period", () => {
     pending.announce("change", "/d/a.txt");
     await flush();
     expect(reported).toEqual(["change"]);
+  });
+
+  test("writes that go on during every read cannot postpone the first report: the reads are bounded and the writes follow as a change", async () => {
+    const timers: Array<() => void> = [];
+    const reported: string[] = [];
+    let calls = 0;
+    const pending: Pending = pendingEvents({
+      atomic: 0,
+      settle: undefined,
+      followSymlinks: true,
+      timeout: (fn) => {
+        timers.push(fn);
+        return {} as NodeJS.Timeout;
+      },
+      dispatch: (event) => reported.push(event),
+      stat: () => {
+        calls++;
+        if (calls <= 20) pending.announce("change", "/d/a.txt");
+        return Promise.resolve({ size: 3, isSymbolicLink: () => false } as Stats);
+      },
+      settled: () => {},
+    });
+    pending.announce("add", "/d/a.txt");
+    await flush();
+    expect(reported).toEqual(["add"]);
+    expect(calls).toBeLessThanOrEqual(4);
+    for (const fn of timers) fn();
+    await flush();
+    expect(reported).toEqual(["add", "change"]);
   });
 });

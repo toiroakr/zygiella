@@ -6,6 +6,8 @@ import type { Entry, WatchEvent } from "./types.ts";
 const QUIET_MS = 50;
 /** An add or change that finds an empty file waits this long for the data, because Linux reports truncate before write. */
 const EMPTY_HOLD_MS = 10;
+/** How often the first read of a file is repeated because a write was announced during it. */
+const MAX_FRESH_READS = 3;
 
 interface Settling {
   event: "add" | "change";
@@ -17,6 +19,8 @@ interface Settling {
   leading?: boolean;
   /** An announce came while the first read was in flight, so that read may be older than the write it announced. */
   dirty?: boolean;
+  /** The entry that the last announce during the first read said was there before its write. */
+  dirtyBefore?: Entry;
   timer?: NodeJS.Timeout;
 }
 
@@ -80,7 +84,7 @@ export function pendingEvents({
     return held.entry;
   };
 
-  return {
+  const api: Pending = {
     holdsUnlinks: atomic > 0,
     announce(event, path, before, renamedFrom) {
       const held = takeHeld(path);
@@ -90,6 +94,7 @@ export function pendingEvents({
         if (event === "add") prior.event = "add";
         prior.renamedFrom = undefined;
         prior.dirty = true;
+        prior.dirtyBefore = before ?? prior.dirtyBefore;
         return;
       }
       clearTimeout(prior?.timer);
@@ -148,14 +153,19 @@ export function pendingEvents({
           if (settling.get(path) !== job) return;
           // a read that was in flight when another announce came may have seen the file before that write
           let result: Awaited<ReturnType<typeof read>>;
+          let fresh = 0;
           do {
             job.dirty = false;
             result = await read();
             if (settling.get(path) !== job) return;
-          } while (job.dirty);
+          } while (job.dirty && ++fresh < MAX_FRESH_READS);
           const { info, link } = result;
           job.leading = false;
-          if (info && info.size > 0) report(info, link);
+          if (info && info.size > 0) {
+            report(info, link);
+            // writes that go on during every read must not postpone this report, so they follow as a change
+            if (job.dirty) api.announce("change", path, job.dirtyBefore);
+          }
           // a file that is gone may be taken back by the removal that is being read, so it gets the longer wait
           else job.timer = timeout(afterHold, info ? EMPTY_HOLD_MS : QUIET_MS);
         })();
@@ -243,4 +253,5 @@ export function pendingEvents({
       unlinks.clear();
     },
   };
+  return api;
 }

@@ -290,7 +290,8 @@ await watcher.close();
   its data (Linux reports a write as truncate then write, and a new file as create then write), and a file that was gone at
   its first read for 50 ms. What is reported less than 50 ms after the previous report of the same file is reported once
   more, 50 ms after its last event. A file that is written in two steps is therefore reported as `add` (or `change`) with
-  the content so far and then as `change` with the rest, or as one `add` when both steps are done before the file is read.
+  the content so far and then as `change` with the rest, or as one `add` when both steps are done before the file is read,
+  and a file that is written continuously is reported about every 50 ms, not once at the end.
   Use `awaitWriteFinish` to wait for the whole file; it replaces these waits.
 - A directory whose inode number changed between two reads is another directory under the same name (`mv src
   src.old` and then `mv staging src`): it is reported as `unlinkDir` with what was in it as `unlink`, then as

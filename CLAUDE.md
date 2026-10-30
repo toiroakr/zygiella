@@ -70,12 +70,13 @@ set), `moves.ts` (pairs a removed and an added file by device, inode, size and m
   several events is reported once more at the end. The first report of an `add` also waits, for `QUIET_MS` at most so that a read that does not come back cannot hold it, for the directory reads
   that are going on when it is announced (`after`, `reading` in `index.ts`), because a move is paired from the add and the removal, which the same read
   or the read of the other directory makes, so `renamedFrom` is still known; a large directory does not wait, because its
-  entries come from named reads. With
+  entries come from named reads. A write announced while the first read of a file is in flight
+  makes that read be repeated (`dirty`, `MAX_FRESH_READS` times at most), and writes that still go on follow as a `change`. With
   `awaitWriteFinish` they wait for a stable size and mtime instead.
 - `ready` waits 50 ms after the watchers are attached, because `fs.watch` returns before FSEvents on macOS
   delivers. A test that makes a change right after `ready` covers this; do not shorten the wait without it.
-- A root that did not exist when it was given to `watch()` or `add()` and appears later is read once more `READY_SETTLE_MS` after
-  its first scan (`readAgainOnceDelivering`), for the reason of the wait before `ready`: a file made right after the first read of
+- A root that did not exist when it was given to `watch()` or `add()` and appears later is read once more, with the directories below it
+  that were read (`readAgain`), `READY_SETTLE_MS` after its first scan (`readAgainOnceDelivering`), for the reason of the wait before `ready`: a file made right after the first read of
   it is not delivered by an `fs.watch` that has just been attached, and would not be reported at all. `test/appeared-root.test.ts`
   covers it with a native watch that delivers nothing.
 - A link to a directory is descended into unless `followSymlinks` is false. `ancestries` keeps the real paths of the

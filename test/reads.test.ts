@@ -47,4 +47,15 @@ describe("the reads that are in flight", () => {
     await flush();
     expect(reads.all()).toBeUndefined();
   });
+
+  test("the same promise is returned until the reads in flight change", async () => {
+    const reads = readsInFlight();
+    const first = deferred();
+    reads.track("/a", first.promise);
+    const all = reads.all();
+    expect(reads.all()).toBe(all);
+    reads.track("/b", deferred().promise);
+    expect(reads.all()).not.toBe(all);
+    first.done();
+  });
 });
