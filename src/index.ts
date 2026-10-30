@@ -107,6 +107,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   const watchedRoots = new Set<string>();
   const kinds = new Map<string, "dir" | "file" | "missing">();
   const probes = new Map<string, string>();
+  const rereads = new Set<NodeJS.Timeout>();
   const entries = new Map<string, Entry>();
   const children = new Map<string, Set<string>>();
   const depthLeft = new Map<string, number>();
@@ -326,6 +327,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     clearTimeout(rescanTimer);
     for (const timer of audits.values()) clearTimeout(timer);
     audits.clear();
+    for (const timer of rereads) clearTimeout(timer);
+    rereads.clear();
     pending.close(entries);
     natives.close();
     await Promise.all([...queues.values()].map((q) => q.done));
@@ -404,9 +407,25 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     }
 
     if (!entries.has(root) && ignored.byStats?.(root, info)) watchSkipped(root, info);
-    else await scanRoot(root, info, link, real, mode);
+    else {
+      await scanRoot(root, info, link, real, mode);
+      if (previousProbe && mode === "live") readAgainOnceDelivering(root);
+    }
     if (previousProbe) natives.release(previousProbe);
     if (previousParent) natives.release(previousParent);
+  }
+
+  /**
+   * `fs.watch` of a root that appeared returns before the OS delivers (FSEvents on macOS), as it does at `ready`, so
+   * a file made right after the first read of the root is never reported: one more read, when delivery has started.
+   */
+  function readAgainOnceDelivering(root: string): void {
+    const timer = timeout(() => {
+      rereads.delete(timer);
+      if (!closed && watchedRoots.has(root))
+        void serial(`root:${root}`, () => syncRoot(root, "live"));
+    }, READY_SETTLE_MS);
+    rereads.add(timer);
   }
 
   /** A root skipped by its stats is watched all the same, so that it is read again when its stats may have changed. */

@@ -74,6 +74,10 @@ set), `moves.ts` (pairs a removed and an added file by device, inode, size and m
   `awaitWriteFinish` they wait for a stable size and mtime instead.
 - `ready` waits 50 ms after the watchers are attached, because `fs.watch` returns before FSEvents on macOS
   delivers. A test that makes a change right after `ready` covers this; do not shorten the wait without it.
+- A root that did not exist when it was given to `watch()` or `add()` and appears later is read once more `READY_SETTLE_MS` after
+  its first scan (`readAgainOnceDelivering`), for the reason of the wait before `ready`: a file made right after the first read of
+  it is not delivered by an `fs.watch` that has just been attached, and would not be reported at all. `test/appeared-root.test.ts`
+  covers it with a native watch that delivers nothing.
 - A link to a directory is descended into unless `followSymlinks` is false. `ancestries` keeps the real paths of the
   directories from the root down to each directory, and a link whose real path is already there is reported but not
   descended into, because a link back to an ancestor would loop forever. With `followSymlinks: false` a link is an
