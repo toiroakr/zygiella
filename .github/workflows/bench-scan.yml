@@ -57,3 +57,18 @@ jobs:
             cat result.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Measure skewed tree
+        run: |
+          for round in 1 2 3 4 5 6 7; do
+            for small in 2000 300; do
+              for side in before after; do
+                printf '%s ' "$side"
+                node harness/bench/skew.mjs "$PWD/$side/dist/index.mjs" "$small"
+              done
+            done
+          done | tee skew.txt
+          {
+            echo '```'
+            cat skew.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
