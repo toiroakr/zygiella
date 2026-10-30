@@ -22,6 +22,7 @@ export function readsInFlight(): ReadsInFlight {
       const forget = () => {
         own.delete(read);
         if (!own.size && reads.get(dir) === own) reads.delete(dir);
+        if (reads.size === 0) aggregate = undefined;
       };
       read.then(forget, forget);
     },
