@@ -121,6 +121,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   const audits = new Map<string, NodeJS.Timeout>();
   /** For each directory the full reads going through it, each with the paths a named entry read recorded meanwhile. */
   const scanning = new Map<string, Set<Set<string>>>();
+  /** The read of each directory that is going on: a first report of an add waits for those that are going on when it is announced (`after`). */
+  const reading = new Map<string, Promise<void>>();
   /**
    * The reads of each path that have not returned yet. Marking them as stale beats comparing a count taken before and
    * after: a count has to be dropped with the path and then reads again the value that a read still in flight took.
@@ -148,6 +150,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     dispatch,
     stat: followStat,
     settled,
+    // a large directory reports from named reads on purpose, so its full read is not waited for
+    after: (path) => (isLarge(dirname(path)) ? undefined : Promise.all(reading.values())),
   });
 
   /**
@@ -538,9 +542,13 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     let reads = scanning.get(dir);
     if (!reads) scanning.set(dir, (reads = new Set()));
     reads.add(recorded);
+    const read = readDir(dir, left, mode, ancestry, recorded);
+    const unfailing = read.catch(() => {});
+    reading.set(dir, unfailing);
     try {
-      await readDir(dir, left, mode, ancestry, recorded);
+      await read;
     } finally {
+      if (reading.get(dir) === unfailing) reading.delete(dir);
       reads.delete(recorded);
       if (!reads.size && scanning.get(dir) === reads) scanning.delete(dir);
     }
