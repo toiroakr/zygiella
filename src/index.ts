@@ -35,6 +35,8 @@ const READY_SETTLE_MS = 50;
 const LARGE_DIRECTORY = 1000;
 // such a directory is read whole once its events have stopped for this long, so an event that was lost is repaired
 const AUDIT_QUIET_MS = 1000;
+// how many entries a scan examines at once on each level of nesting; more than this keeps RSS up without making the scan faster, as in readdirp
+const SCAN_WORKERS = 256;
 const differs = (previous: Entry, next: Entry): boolean =>
   previous.mtimeMs !== next.mtimeMs ||
   previous.size !== next.size ||
@@ -132,6 +134,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   const reads = new Map<string, Set<{ stale: boolean }>>();
   let rescanTimer: NodeJS.Timeout | undefined;
   let closed = false;
+  let scanBudget = SCAN_WORKERS;
   let ready: Promise<ReadyResult>;
 
   const natives = nativeWatches({
@@ -578,6 +581,54 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     }
   }
 
+  // Reads that still have names and fewer workers than they could use, oldest first; a freed worker goes to the first.
+  // A read that fixed its workers when it started would stay at one for a large directory that began while the
+  // budget was spent, and its names would be read one by one though the others have finished.
+  const growable = new Set<{ more: () => boolean; add: () => void }>();
+
+  function lend(): void {
+    while (scanBudget > 0) {
+      const read = growable.values().next().value;
+      if (!read) return;
+      if (!read.more()) growable.delete(read);
+      else {
+        scanBudget--;
+        read.add();
+      }
+    }
+  }
+
+  // One worker is kept even when the budget is spent: the worker reading a subdirectory waits for it, and a read
+  // that waited for a free worker could wait for its own parent.
+  async function eachName(names: readonly string[], each: (name: string) => Promise<unknown>) {
+    const first = Math.min(names.length, Math.max(1, scanBudget));
+    scanBudget -= first;
+    let next = 0;
+    let failure: { error: unknown } | undefined;
+    const running: Promise<void>[] = [];
+    const work = async (): Promise<void> => {
+      try {
+        while (next < names.length && !closed) await each(names[next++]!);
+      } catch (error) {
+        failure ??= { error };
+        next = names.length;
+      } finally {
+        scanBudget++;
+        lend();
+      }
+    };
+    const add = () => void running.push(work());
+    for (let i = 0; i < first; i++) add();
+    const read = { more: () => next < names.length && !closed, add };
+    if (first < names.length) growable.add(read);
+    // a worker added by `lend` while this waits is pushed to `running`, so the loop reaches it
+    for (let i = 0; i < running.length; i++) await running[i];
+    // not left for `lend` to drop: the budget can stay at or below 0 through a long scan, and a finished read would hold
+    // its names and closures all that time
+    growable.delete(read);
+    if (failure) throw failure.error;
+  }
+
   async function readDir(
     dir: string,
     left: number,
@@ -603,36 +654,29 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     const covered = () => [...watchedRoots].some((root) => within(root, dir));
     const examine = (path: string) =>
       syncEntry(dir, basename(path), left, mode, ancestry, seen, uninspectable);
-    await Promise.all(
-      names.map((name) => syncEntry(dir, name, left, mode, ancestry, seen, uninspectable)),
+    await eachName(names, (name) =>
+      syncEntry(dir, name, left, mode, ancestry, seen, uninspectable),
     );
     if (closed) return;
     const listed = new Set(names);
     // One name at a time would make a bulk removal wait for a round trip per file, and waiting for all of them before
     // removing any would leave the window open again, so each is removed as soon as its own check is done.
-    await Promise.all(
-      Array.from(children.get(dir) ?? [], async (path) => {
-        if (
-          seen.has(path) ||
-          uninspectable.has(path) ||
-          recorded.has(path) ||
-          watchedRoots.has(path)
-        )
-          return;
-        if (!covered() || !children.get(dir)?.has(path)) return;
-        // The siblings may have taken long: a file that was missing at its read can be back and reported since then. Not
-        // a directory: one that is being deleted can still be read, and keeping it would keep its native watcher open.
-        if (entries.get(path)?.dir === false) {
-          if ((await examine(path)) || closed) return;
-          // what was true before the check may not be any more: `add()` can have made the path a root of its own
-          if (watchedRoots.has(path) || !covered() || !children.get(dir)?.has(path)) return;
-          // a refused read does not keep a name the listing did not have (a directory that is being deleted can refuse one),
-          // but a name it had, whose first read found it missing, is not known to be gone
-          if (listed.has(basename(path)) && uninspectable.has(path)) return;
-        }
-        remove(path, true, undefined, mode !== "seed");
-      }),
-    );
+    await eachName(Array.from(children.get(dir) ?? []), async (path) => {
+      if (seen.has(path) || uninspectable.has(path) || recorded.has(path) || watchedRoots.has(path))
+        return;
+      if (!covered() || !children.get(dir)?.has(path)) return;
+      // The siblings may have taken long: a file that was missing at its read can be back and reported since then. Not
+      // a directory: one that is being deleted can still be read, and keeping it would keep its native watcher open.
+      if (entries.get(path)?.dir === false) {
+        if ((await examine(path)) || closed) return;
+        // what was true before the check may not be any more: `add()` can have made the path a root of its own
+        if (watchedRoots.has(path) || !covered() || !children.get(dir)?.has(path)) return;
+        // a refused read does not keep a name the listing did not have (a directory that is being deleted can refuse one),
+        // but a name it had, whose first read found it missing, is not known to be gone
+        if (listed.has(basename(path)) && uninspectable.has(path)) return;
+      }
+      remove(path, true, undefined, mode !== "seed");
+    });
     if (closed) return;
     for (const path of denied) {
       if (dirname(path) === dir && !listed.has(basename(path))) denied.delete(path);
