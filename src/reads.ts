@@ -10,7 +10,8 @@ export interface ReadsInFlight {
 
 export function readsInFlight(): ReadsInFlight {
   const reads = new Map<string, Set<Promise<unknown>>>();
-  // one aggregate for everything that waits on the same set of reads, instead of one per waiter
+  // one aggregate for everything that waits on the reads that were in flight when it was made, instead of one per waiter;
+  // a read that finishes does not change what such a waiter waits for, so only a read that starts makes a new one
   let aggregate: Promise<unknown> | undefined;
   return {
     track(dir, read) {
@@ -19,16 +20,14 @@ export function readsInFlight(): ReadsInFlight {
       own.add(read);
       aggregate = undefined;
       const forget = () => {
-        aggregate = undefined;
         own.delete(read);
         if (!own.size && reads.get(dir) === own) reads.delete(dir);
       };
       read.then(forget, forget);
     },
     all() {
-      if (aggregate) return aggregate;
-      const all = [...reads.values()].flatMap((own) => [...own]);
-      return all.length > 0 ? (aggregate = Promise.all(all)) : undefined;
+      if (reads.size === 0) return (aggregate = undefined);
+      return (aggregate ??= Promise.all([...reads.values()].flatMap((own) => [...own])));
     },
   };
 }

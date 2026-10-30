@@ -58,4 +58,15 @@ describe("the reads that are in flight", () => {
     expect(reads.all()).not.toBe(all);
     first.done();
   });
+
+  test("a read that finishes does not make a new aggregate while others are still in flight", async () => {
+    const reads = readsInFlight();
+    const first = deferred();
+    reads.track("/a", first.promise);
+    reads.track("/b", deferred().promise);
+    const all = reads.all();
+    first.done();
+    await flush();
+    expect(reads.all()).toBe(all);
+  });
 });
