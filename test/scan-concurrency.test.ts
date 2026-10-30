@@ -113,6 +113,26 @@ describe("the first scan", () => {
     expect(inFlight.below.max).toBeGreaterThan(8);
   });
 
+  test("checks the entries that are gone from a directory without 1000 reads at once, and reports each as removed", async () => {
+    await files(join(dir, "flat"), 1000);
+    const before = watch(dir, { atomic: false });
+    await new Promise<void>((r) => before.once("ready", () => r()));
+    const snapshot = before.snapshot();
+    await before.close();
+    // the directory stays, so it is the same directory with its files gone, and not another one under the same name
+    for (let first = 0; first < 1000; first += 50)
+      await Promise.all(
+        Array.from({ length: 50 }, (_, i) => rm(join(dir, "flat", `f${first + i}`))),
+      );
+    inFlight.max = 0;
+    watcher = watch(dir, { atomic: false, since: snapshot });
+    const counts = new Map<string, number>();
+    watcher.on("all", (event) => counts.set(event, (counts.get(event) ?? 0) + 1));
+    await new Promise<void>((r) => watcher!.once("ready", () => r()));
+    expect(counts.get("unlink")).toBe(1000);
+    expect(inFlight.max).toBeLessThanOrEqual(AT_MOST);
+  });
+
   test("stops reading the names of a directory once the watcher is closed", async () => {
     await files(join(dir, "flat"), 1000);
     const closed = new Promise<void>((done) => {
