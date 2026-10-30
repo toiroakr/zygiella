@@ -186,18 +186,19 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   }
 
   /** The file settled at this size and mtime: the entry may not know yet, as no native event reads it again. */
-  function settled(path: string, info: Stats, link: string | undefined): void {
+  function settled(path: string, info: Stats, link: string | undefined): Entry | undefined {
     const entry = entries.get(path);
-    if (entry && !entry.dir) {
-      staleReads(path);
-      entries.set(path, {
-        ...entry,
-        mtimeMs: info.mtimeMs,
-        size: info.size,
-        ino: info.ino,
-        link: info.isSymbolicLink() ? (link ?? entry.link) : undefined,
-      });
-    }
+    if (!entry || entry.dir) return undefined;
+    staleReads(path);
+    const next: Entry = {
+      ...entry,
+      mtimeMs: info.mtimeMs,
+      size: info.size,
+      ino: info.ino,
+      link: info.isSymbolicLink() ? (link ?? entry.link) : undefined,
+    };
+    entries.set(path, next);
+    return next;
   }
 
   function staleReads(path: string): void {
@@ -298,17 +299,17 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     // read that a tree watch asks for after it lost track
     if (retryLimits) natives.retry();
     retryLimits = false;
-    await readAgain([...watchedRoots]);
+    await readAgain([...watchedRoots], true);
   }
 
-  /** Reads the roots and every directory below them that was descended into, again. */
-  async function readAgain(roots: readonly string[]): Promise<void> {
+  /** Reads the roots and every directory below them that was descended into, again; `all` says the roots are all of them. */
+  async function readAgain(roots: readonly string[], all = false): Promise<void> {
     await Promise.all(roots.map((root) => serial(`root:${root}`, () => syncRoot(root, "live"))));
     // a read can drop a directory or change what lies below it, so shallow directories go first and each one is
     // looked up again when its turn comes
     const levels = new Map<number, string[]>();
     for (const dir of depthLeft.keys()) {
-      if (!roots.some((root) => within(root, dir))) continue;
+      if (!all && !roots.some((root) => within(root, dir))) continue;
       const depth = dir.split(sep).length;
       const level = levels.get(depth);
       if (level) level.push(dir);

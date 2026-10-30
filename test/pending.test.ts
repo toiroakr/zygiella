@@ -1,6 +1,7 @@
 import type { Stats } from "node:fs";
 import { describe, expect, test } from "vitest";
 import { pendingEvents, type Pending } from "../src/pending.ts";
+import type { Entry } from "../src/types.ts";
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -21,7 +22,7 @@ function harness(size: () => number | undefined) {
       if (bytes === undefined) throw Object.assign(new Error("gone"), { code: "ENOENT" });
       return { size: bytes, isSymbolicLink: () => false } as Stats;
     },
-    settled: () => {},
+    settled: () => undefined,
   });
   return { pending, timers, reported };
 }
@@ -97,7 +98,7 @@ describe("reporting add and change without waiting for a quiet period", () => {
       timeout: () => ({}) as NodeJS.Timeout,
       dispatch: (event) => reported.push(event),
       stat: async () => ({ size: 3, isSymbolicLink: () => false }) as Stats,
-      settled: () => {},
+      settled: () => undefined,
       after: () => gate,
     });
     pending.announce("add", "/d/a.txt");
@@ -132,7 +133,7 @@ describe("reporting add and change without waiting for a quiet period", () => {
       },
       dispatch: (event) => reported.push(event),
       stat: async () => ({ size: 3, isSymbolicLink: () => false }) as Stats,
-      settled: () => {},
+      settled: () => undefined,
       after: () => new Promise(() => {}),
     });
     pending.announce("add", "/d/a.txt");
@@ -167,7 +168,7 @@ describe("reporting add and change without waiting for a quiet period", () => {
       timeout: () => ({}) as NodeJS.Timeout,
       dispatch: (_event, _path, from) => renamedFrom.push(from),
       stat: async () => ({ size: 3, isSymbolicLink: () => false }) as Stats,
-      settled: () => {},
+      settled: () => undefined,
     });
     pending.announce("add", "/d/b.txt", undefined, "/d/a.txt");
     pending.announce("change", "/d/b.txt");
@@ -193,7 +194,10 @@ describe("reporting add and change without waiting for a quiet period", () => {
           release = () => resolve({ size: 1, isSymbolicLink: () => false } as Stats);
         });
       },
-      settled: (_path, info) => settledSizes.push(info.size),
+      settled: (_path, info) => {
+        settledSizes.push(info.size);
+        return undefined;
+      },
     });
     pending.announce("add", "/d/a.txt");
     await flush();
@@ -213,7 +217,7 @@ describe("reporting add and change without waiting for a quiet period", () => {
       timeout: () => ({}) as NodeJS.Timeout,
       dispatch: (event) => reported.push(event),
       stat: async () => ({ size: 3, isSymbolicLink: () => false }) as Stats,
-      settled: () => {},
+      settled: () => undefined,
       after: () => new Promise(() => {}),
     });
     pending.announce("change", "/d/a.txt");
@@ -239,7 +243,7 @@ describe("reporting add and change without waiting for a quiet period", () => {
         if (calls <= 20) pending.announce("change", "/d/a.txt");
         return Promise.resolve({ size: 3, isSymbolicLink: () => false } as Stats);
       },
-      settled: () => {},
+      settled: () => undefined,
     });
     pending.announce("add", "/d/a.txt");
     await flush();
@@ -248,5 +252,53 @@ describe("reporting add and change without waiting for a quiet period", () => {
     for (const fn of timers) fn();
     await flush();
     expect(reported).toEqual(["add", "change"]);
+  });
+
+  function sustained(onDispatch: (event: string, pending: Pending) => void, recorded?: Entry) {
+    const timers: Array<() => void> = [];
+    const reported: string[] = [];
+    let calls = 0;
+    const pending: Pending = pendingEvents({
+      atomic: 0,
+      settle: undefined,
+      followSymlinks: true,
+      timeout: (fn) => {
+        timers.push(fn);
+        return {} as NodeJS.Timeout;
+      },
+      dispatch: (event) => {
+        reported.push(event);
+        onDispatch(event, pending);
+      },
+      stat: () => {
+        calls++;
+        // during each of the reads that the first report is allowed, and not afterwards
+        if (calls <= 3) pending.announce("change", "/d/a.txt");
+        return Promise.resolve({ size: 3, isSymbolicLink: () => false } as Stats);
+      },
+      settled: () => recorded,
+    });
+    return { pending, timers, reported };
+  }
+
+  test("a listener that stops watching the path when its add is reported gets no change afterwards", async () => {
+    const { pending, timers, reported } = sustained((event, p) => {
+      if (event === "add") p.cancel("/d/a.txt");
+    });
+    pending.announce("add", "/d/a.txt");
+    await flush();
+    for (const fn of timers) fn();
+    await flush();
+    expect(reported).toEqual(["add"]);
+  });
+
+  test("the change that follows sustained writes starts from the entry that was recorded for the add", async () => {
+    const recorded: Entry = { dir: false, mtimeMs: 1, size: 3, ino: 1 };
+    const { pending } = sustained(() => {}, recorded);
+    pending.announce("add", "/d/a.txt");
+    await flush();
+    expect(pending.baseline("/d/a.txt", { dir: false, mtimeMs: 2, size: 9, ino: 1 })).toBe(
+      recorded,
+    );
   });
 });
