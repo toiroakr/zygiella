@@ -75,3 +75,17 @@ test("many unmatched observations are expired in one pass, not once per observat
   now = 5000;
   expect(moves.removed("/w/x", file(1))).toBeUndefined();
 });
+
+test("a file that was added and then removed at the same path is not what a later removal pairs with", () => {
+  const moves = trackMoves();
+  moves.added("/w/d", file(7));
+  moves.removed("/w/d", file(7));
+  expect(moves.removed("/w/s", file(7))).toBeUndefined();
+});
+
+test("a file that was removed and then added at the same path is not what a later addition pairs with", () => {
+  const moves = trackMoves();
+  moves.removed("/w/d", file(7));
+  moves.added("/w/d", file(7));
+  expect(moves.added("/w/s", file(7))).toBeUndefined();
+});

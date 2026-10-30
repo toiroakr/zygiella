@@ -30,10 +30,11 @@ export function trackMoves(now: () => number = Date.now): Moves {
     const at = now();
     const key = `${entry.dev}:${entry.ino}`;
     const candidate = other.get(key);
-    if (
+    // the file came and went at one path: the other side's record no longer names anything that exists
+    if (candidate?.path === path) other.delete(key);
+    else if (
       candidate &&
       at - candidate.at <= WINDOW_MS &&
-      candidate.path !== path &&
       candidate.entry.dev === entry.dev &&
       candidate.entry.size === entry.size &&
       candidate.entry.mtimeMs === entry.mtimeMs

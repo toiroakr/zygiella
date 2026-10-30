@@ -855,20 +855,25 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       // an add that never settled was never reported, so there is nothing to take back; one that was paired goes on
       // from the path it came from, so that the next add of the file names it
       if (job?.event === "add") {
-        const origin = job.renamedFrom;
-        const to = origin && !entry.dir ? moves.removed(origin, entry) : undefined;
-        if (origin && to) pending.renamed(to, origin);
+        if (job.renamedFrom && !entry.dir) pairMove(job.renamedFrom, entry);
         continue;
       }
       if (entry.dir) {
         dispatch("unlinkDir", key);
         continue;
       }
-      const to = moves.removed(key, entry);
-      if (to) pending.renamed(to, key);
+      pairMove(key, entry);
       if (defer && pending.holdsUnlinks && key === path) pending.hold(key, job?.before ?? entry);
       else dispatch("unlink", key);
     }
+  }
+
+  /** The file of `entry` was removed at `from`: the add waiting at the path it appeared at names `from`, if that is still the same file. */
+  function pairMove(from: string, entry: Entry): void {
+    const to = moves.removed(from, entry);
+    const current = to === undefined ? undefined : entries.get(to);
+    if (to !== undefined && current?.dev === entry.dev && current?.ino === entry.ino)
+      pending.renamed(to, from);
   }
 
   function dispatch(event: WatchEvent, path: string, renamedFrom?: string): void {
