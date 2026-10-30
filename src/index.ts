@@ -549,20 +549,47 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     }
   }
 
+  // Reads that still have names and fewer workers than they could use, oldest first; a freed worker goes to the first.
+  // A read that fixed its workers when it started would stay at one for a large directory that began while the
+  // budget was spent, and its names would be read one by one though the others have finished.
+  const growable: Array<{ more: () => boolean; add: () => void }> = [];
+
+  function lend(): void {
+    while (scanBudget > 0 && growable.length) {
+      const read = growable[0]!;
+      if (!read.more()) growable.shift();
+      else {
+        scanBudget--;
+        read.add();
+      }
+    }
+  }
+
   // One worker is kept even when the budget is spent: the worker reading a subdirectory waits for it, and a read
   // that waited for a free worker could wait for its own parent.
   async function eachName(names: readonly string[], each: (name: string) => Promise<unknown>) {
-    const workers = Math.min(names.length, Math.max(1, scanBudget));
-    scanBudget -= workers;
+    const first = Math.min(names.length, Math.max(1, scanBudget));
+    scanBudget -= first;
     let next = 0;
+    let failure: { error: unknown } | undefined;
+    const running: Promise<void>[] = [];
     const work = async (): Promise<void> => {
       try {
         while (next < names.length && !closed) await each(names[next++]!);
+      } catch (error) {
+        failure ??= { error };
+        next = names.length;
       } finally {
         scanBudget++;
+        lend();
       }
     };
-    await Promise.all(Array.from({ length: workers }, work));
+    const add = () => void running.push(work());
+    for (let i = 0; i < first; i++) add();
+    if (first < names.length) growable.push({ more: () => next < names.length && !closed, add });
+    // a worker added by `lend` while this waits is pushed to `running`, so the loop reaches it
+    for (let i = 0; i < running.length; i++) await running[i];
+    if (failure) throw failure.error;
   }
 
   async function readDir(

@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, realpath, rm as removeOnce, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 // only lstat and stat are wrapped, to count how many run at once and how many ran; everything else is the real file system
@@ -10,6 +10,8 @@ const inFlight = vi.hoisted(() => ({
   total: 0,
   // called with the number of calls so far, so a test can act in the middle of a scan
   onCall: undefined as ((total: number) => void) | undefined,
+  // the same count for the paths below one directory, to see how many workers it was given
+  below: { prefix: "", now: 0, max: 0 },
 }));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -19,7 +21,13 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     (...args: Parameters<T>) => {
       inFlight.max = Math.max(inFlight.max, ++inFlight.now);
       inFlight.onCall?.(++inFlight.total);
-      return (call(...args) as Promise<unknown>).finally(() => inFlight.now--);
+      const below =
+        inFlight.below.prefix !== "" && String(args[0]).startsWith(inFlight.below.prefix);
+      if (below) inFlight.below.max = Math.max(inFlight.below.max, ++inFlight.below.now);
+      return (call(...args) as Promise<unknown>).finally(() => {
+        inFlight.now--;
+        if (below) inFlight.below.now--;
+      });
     };
   return {
     ...actual,
@@ -46,6 +54,7 @@ beforeEach(async () => {
   inFlight.max = 0;
   inFlight.total = 0;
   inFlight.onCall = undefined;
+  inFlight.below = { prefix: "", now: 0, max: 0 };
 });
 
 afterEach(async () => {
@@ -93,6 +102,15 @@ describe("the first scan", () => {
     const counts = await scan();
     expect(counts.get("addDir")).toBe(1 + 260 * 2);
     expect(counts.get("add")).toBe(260);
+  });
+
+  test("gives a large directory more workers once the others have finished, though it started when none were free", async () => {
+    // "0big" sorts first, so a worker takes it while the other 255 are held by the small directories
+    await files(join(dir, "0big"), 3000);
+    for (let i = 0; i < 400; i++) await files(join(dir, `s${i}`), 1);
+    inFlight.below.prefix = join(dir, "0big") + sep;
+    await scan();
+    expect(inFlight.below.max).toBeGreaterThan(8);
   });
 
   test("stops reading the names of a directory once the watcher is closed", async () => {
