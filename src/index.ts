@@ -2,12 +2,14 @@ import { EventEmitter } from "node:events";
 import type { Stats } from "node:fs";
 import { lstat, readdir, readlink, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, relative, sep } from "node:path";
+import { trackMoves } from "./moves.ts";
 import { pendingEvents } from "./pending.ts";
 import { DENIED, VANISHED, nativeWatches, nearestDirectory } from "./native.ts";
 import { recorded, seedEntries, toSnapshot } from "./snapshot.ts";
 import { list, within } from "./match.ts";
 import { resolveOptions } from "./options.ts";
 import type {
+  AddDetails,
   Entry,
   Events,
   ReadyResult,
@@ -18,6 +20,7 @@ import type {
 } from "./types.ts";
 
 export type {
+  AddDetails,
   Ignored,
   ReadyResult,
   Snapshot,
@@ -136,6 +139,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     },
     onError: fail,
   });
+  const moves = trackMoves();
   const pending = pendingEvents({
     atomic: atomicMs,
     settle,
@@ -758,6 +762,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       mtimeMs: info.mtimeMs,
       size: info.size,
       ino: info.ino,
+      dev: info.dev,
       link,
     };
     let previous = entries.get(path);
@@ -784,6 +789,9 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       setEntry(path, next);
       if (mode === "seed") dispatch("change", path);
       else if (mode !== "quiet") pending.announce("change", path, previous);
+    } else if (!next.dir && previous.dev === undefined) {
+      // an entry seeded from a snapshot has no device, and a move of it could never be paired without one
+      entries.set(path, { ...previous, dev: next.dev });
     }
   }
 
@@ -795,14 +803,16 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     ancestry: readonly string[],
   ): Promise<void> {
     if (next.dir) pending.flush(path);
+    const from = mode === "live" ? moves.added(path, next) : undefined;
     // an unlink listener may have closed the watcher: the entry would be in the baseline without being reported
     if (closed) return;
     setEntry(path, next);
     if (next.dir) {
       if (mode !== "quiet") dispatch("addDir", path);
       if (left > 0) await syncDir(path, left - 1, mode, ancestry);
-    } else if (mode === "live" || pending.isHeld(path)) pending.announce("add", path);
-    else if (mode !== "quiet") dispatch("add", path);
+    } else if (mode === "live" || pending.isHeld(path))
+      pending.announce("add", path, undefined, from);
+    else if (mode !== "quiet") dispatch("add", path, from);
   }
 
   function setEntry(path: string, entry: Entry): void {
@@ -841,20 +851,42 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
         ancestries.delete(key);
         natives.release(key);
       }
-      // an add that never settled was never reported, so there is nothing to take back
-      if (!report || job?.event === "add") continue;
-      if (entry.dir) dispatch("unlinkDir", key);
-      else if (defer && pending.holdsUnlinks && key === path)
-        pending.hold(key, job?.before ?? entry);
+      if (!report) continue;
+      // an add that never settled was never reported, so there is nothing to take back; one that was paired goes on
+      // from the path it came from, so that the next add of the file names it
+      if (job?.event === "add") {
+        if (job.renamedFrom && !entry.dir) pairMove(job.renamedFrom, entry);
+        continue;
+      }
+      if (entry.dir) {
+        dispatch("unlinkDir", key);
+        continue;
+      }
+      pairMove(key, entry);
+      if (defer && pending.holdsUnlinks && key === path) pending.hold(key, job?.before ?? entry);
       else dispatch("unlink", key);
     }
   }
 
-  function dispatch(event: WatchEvent, path: string): void {
+  /** The file of `entry` was removed at `from`: the add waiting at the path it appeared at names `from`, if that is still the same file. */
+  function pairMove(from: string, entry: Entry): void {
+    const to = moves.removed(from, entry);
+    const current = to === undefined ? undefined : entries.get(to);
+    // a file written since it appeared is not the file that was paired, as in `announce`
+    const same =
+      current?.dev === entry.dev &&
+      current?.ino === entry.ino &&
+      current?.size === entry.size &&
+      current?.mtimeMs === entry.mtimeMs;
+    if (to !== undefined && same) pending.renamed(to, from);
+  }
+
+  function dispatch(event: WatchEvent, path: string, renamedFrom?: string): void {
     if (closed) return;
+    const details: AddDetails[] = renamedFrom === undefined ? [] : [{ renamedFrom }];
     // `emit` forwards the arguments as given, and the events map types them per event
-    (emitter.emit as (event: string, ...args: unknown[]) => boolean)(event, path);
-    if (!closed) emitter.emit("all", event, path);
+    (emitter.emit as (event: string, ...args: unknown[]) => boolean)(event, path, ...details);
+    if (!closed) emitter.emit("all", event, path, ...details);
   }
 
   /** A path that vanished is a race with whoever removed it. A permission error is reported once per path until the path reads again. */

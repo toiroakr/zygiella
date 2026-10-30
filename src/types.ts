@@ -80,13 +80,19 @@ export interface ReadyResult {
   missing: string[];
 }
 
+/** The second argument of `add`, and the third of `all`, when the file is one that was moved from another path. */
+export interface AddDetails {
+  /** Absolute path the file was at, which is reported as `unlink` too. Found by device, inode, size and mtime within a second. */
+  renamedFrom: string;
+}
+
 export interface Events {
-  add: [path: string];
+  add: [path: string, details?: AddDetails];
   addDir: [path: string];
   change: [path: string];
   unlink: [path: string];
   unlinkDir: [path: string];
-  all: [event: WatchEvent, path: string];
+  all: [event: WatchEvent, path: string, details?: AddDetails];
   ready: [result: ReadyResult];
   error: [error: Error];
 }
@@ -96,6 +102,8 @@ export interface Entry {
   mtimeMs: number;
   size: number;
   ino: number;
+  /** The device (file system) `ino` belongs to: an inode number is only unique within one device. Not recorded in a snapshot, so unknown for a file seeded from one until its first read; a directory seeded from one stays without it. */
+  dev?: number;
   /** Where a link points when it is watched as itself; for a directory, its real path. */
   link?: string;
 }
