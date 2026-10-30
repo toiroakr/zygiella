@@ -4,6 +4,7 @@ import { lstat, readdir, readlink, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, relative, sep } from "node:path";
 import { trackMoves } from "./moves.ts";
 import { pendingEvents } from "./pending.ts";
+import { readsInFlight } from "./reads.ts";
 import { DENIED, VANISHED, nativeWatches, nearestDirectory } from "./native.ts";
 import { recorded, seedEntries, toSnapshot } from "./snapshot.ts";
 import { list, within } from "./match.ts";
@@ -107,6 +108,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   const watchedRoots = new Set<string>();
   const kinds = new Map<string, "dir" | "file" | "missing">();
   const probes = new Map<string, string>();
+  const rereads = new Set<NodeJS.Timeout>();
   const entries = new Map<string, Entry>();
   const children = new Map<string, Set<string>>();
   const depthLeft = new Map<string, number>();
@@ -121,6 +123,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   const audits = new Map<string, NodeJS.Timeout>();
   /** For each directory the full reads going through it, each with the paths a named entry read recorded meanwhile. */
   const scanning = new Map<string, Set<Set<string>>>();
+  /** The directory reads that are going on: a first report of an add waits for those that are going on when it is announced (`after`). */
+  const reading = readsInFlight();
   /**
    * The reads of each path that have not returned yet. Marking them as stale beats comparing a count taken before and
    * after: a count has to be dropped with the path and then reads again the value that a read still in flight took.
@@ -148,6 +152,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     dispatch,
     stat: followStat,
     settled,
+    // a large directory reports from named reads on purpose, so its full read is not waited for
+    after: (path) => (isLarge(dirname(path)) ? undefined : reading.all()),
   });
 
   /**
@@ -180,18 +186,19 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   }
 
   /** The file settled at this size and mtime: the entry may not know yet, as no native event reads it again. */
-  function settled(path: string, info: Stats, link: string | undefined): void {
+  function settled(path: string, info: Stats, link: string | undefined): Entry | undefined {
     const entry = entries.get(path);
-    if (entry && !entry.dir) {
-      staleReads(path);
-      entries.set(path, {
-        ...entry,
-        mtimeMs: info.mtimeMs,
-        size: info.size,
-        ino: info.ino,
-        link: info.isSymbolicLink() ? (link ?? entry.link) : undefined,
-      });
-    }
+    if (!entry || entry.dir) return undefined;
+    staleReads(path);
+    const next: Entry = {
+      ...entry,
+      mtimeMs: info.mtimeMs,
+      size: info.size,
+      ino: info.ino,
+      link: info.isSymbolicLink() ? (link ?? entry.link) : undefined,
+    };
+    entries.set(path, next);
+    return next;
   }
 
   function staleReads(path: string): void {
@@ -292,13 +299,17 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     // read that a tree watch asks for after it lost track
     if (retryLimits) natives.retry();
     retryLimits = false;
-    await Promise.all(
-      [...watchedRoots].map((root) => serial(`root:${root}`, () => syncRoot(root, "live"))),
-    );
+    await readAgain([...watchedRoots], true);
+  }
+
+  /** Reads the roots and every directory below them that was descended into, again; `all` says the roots are all of them. */
+  async function readAgain(roots: readonly string[], all = false): Promise<void> {
+    await Promise.all(roots.map((root) => serial(`root:${root}`, () => syncRoot(root, "live"))));
     // a read can drop a directory or change what lies below it, so shallow directories go first and each one is
     // looked up again when its turn comes
     const levels = new Map<number, string[]>();
     for (const dir of depthLeft.keys()) {
+      if (!all && !roots.some((root) => within(root, dir))) continue;
       const depth = dir.split(sep).length;
       const level = levels.get(depth);
       if (level) level.push(dir);
@@ -322,6 +333,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     clearTimeout(rescanTimer);
     for (const timer of audits.values()) clearTimeout(timer);
     audits.clear();
+    for (const timer of rereads) clearTimeout(timer);
+    rereads.clear();
     pending.close(entries);
     natives.close();
     await Promise.all([...queues.values()].map((q) => q.done));
@@ -400,9 +413,26 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     }
 
     if (!entries.has(root) && ignored.byStats?.(root, info)) watchSkipped(root, info);
-    else await scanRoot(root, info, link, real, mode);
+    else {
+      await scanRoot(root, info, link, real, mode);
+      if (previousProbe && mode === "live") readAgainOnceDelivering(root);
+    }
     if (previousProbe) natives.release(previousProbe);
     if (previousParent) natives.release(previousParent);
+  }
+
+  /**
+   * `fs.watch` of a root that appeared returns before the OS delivers (FSEvents on macOS), as it does at `ready`, so
+   * a file made right after the first read of the root is never reported: one more read, when delivery has started.
+   */
+  function readAgainOnceDelivering(root: string): void {
+    // a scan that was still reading when close() was called must not schedule anything
+    if (closed) return;
+    const timer = timeout(() => {
+      rereads.delete(timer);
+      if (!closed && watchedRoots.has(root)) void readAgain([root]);
+    }, READY_SETTLE_MS);
+    rereads.add(timer);
   }
 
   /** A root skipped by its stats is watched all the same, so that it is read again when its stats may have changed. */
@@ -538,8 +568,10 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     let reads = scanning.get(dir);
     if (!reads) scanning.set(dir, (reads = new Set()));
     reads.add(recorded);
+    const read = readDir(dir, left, mode, ancestry, recorded);
+    reading.track(dir, read);
     try {
-      await readDir(dir, left, mode, ancestry, recorded);
+      await read;
     } finally {
       reads.delete(recorded);
       if (!reads.size && scanning.get(dir) === reads) scanning.delete(dir);

@@ -41,7 +41,7 @@ all three.
 `src/index.ts` holds `watch()`, which keeps the state of one watcher in a closure and returns an `EventEmitter` (`FSWatcher` is
 only a type). The parts that own their own state or have none are in their own files: `match.ts` (the `ignored` matcher, no
 state), `snapshot.ts` (validating and seeding a snapshot, no state), `options.ts` (the defaults and validation of the options, no state), `native.ts` (the `fs.watch` handles and the unwatched
-set), `moves.ts` (pairs a removed and an added file by device, inode, size and mtime within 1 s, so `add` can carry `renamedFrom`), `pending.ts` (add / change waiting to settle and unlinks held for `atomic`) and `types.ts`. The tests in `test/` run against the real file system.
+set), `moves.ts` (pairs a removed and an added file by device, inode, size and mtime within 1 s, so `add` can carry `renamedFrom`), `pending.ts` (add / change waiting to settle and unlinks held for `atomic`), `reads.ts` (the directory reads in flight, which the first `add` waits for) and `types.ts`. The tests in `test/` run against the real file system.
 
 - Each directory that is descended into has its own `fs.watch`, except on macOS, where `natives.ensureTree` watches a
   root and everything below it with one `recursive: true` watch (not with a finite `depth`). `hasTree` says whether a root has one, and `physical` in `index.ts` whether it reports a directory: a directory
@@ -62,11 +62,23 @@ set), `moves.ts` (pairs a removed and an added file by device, inode, size and m
   and goes through `remove` and `visitNew`, so a directory moved away and replaced by another one reports
   `unlinkDir` / `unlink` and then `addDir` / `add`. chokidar does the same (`replacedSinceObserved` in `tree.ts`).
 - `Mode` decides whether a diff reports: `quiet` (remember only, for `ignoreInitial`), `initial` (report at
-  once, it is what `ready` waits for) and `live` (report after a quiet period, see below).
-- `add` and `change` reports wait for 50 ms of quiet per file, because Linux splits a write into truncate and
-  write. With `awaitWriteFinish` they wait for a stable size and mtime instead.
+  once, it is what `ready` waits for) and `live` (report through `pending.ts`, see below).
+- `add` and `change` are reported as soon as the first `stat` of the file shows content, as chokidar and
+  @parcel/watcher report the first change at once. A file that is still empty is held for `EMPTY_HOLD_MS` (10 ms),
+  because Linux splits a write into truncate and write, and a native event for it in that time reports it at once. A path
+  reported less than `QUIET_MS` (50 ms) ago (`reportedRecently`) waits for 50 ms of quiet instead, so a write that comes as
+  several events is reported once more at the end. The first report of an `add` also waits, for `QUIET_MS` at most so that a read that does not come back cannot hold it, for the directory reads
+  that are going on when it is announced (`after`, `reading` in `index.ts`), because a move is paired from the add and the removal, which the same read
+  or the read of the other directory makes, so `renamedFrom` is still known; a large directory does not wait, because its
+  entries come from named reads. A write announced while the first read of a file is in flight
+  makes that read be repeated (`dirty`, `MAX_FRESH_READS` times at most), and writes that still go on follow as a `change`. With
+  `awaitWriteFinish` they wait for a stable size and mtime instead.
 - `ready` waits 50 ms after the watchers are attached, because `fs.watch` returns before FSEvents on macOS
   delivers. A test that makes a change right after `ready` covers this; do not shorten the wait without it.
+- A root that did not exist when it was given to `watch()` or `add()` and appears later is read once more, with the directories below it
+  that were read (`readAgain`), `READY_SETTLE_MS` after its first scan (`readAgainOnceDelivering`), for the reason of the wait before `ready`: a file made right after the first read of
+  it is not delivered by an `fs.watch` that has just been attached, and would not be reported at all. `test/appeared-root.test.ts`
+  covers it with a native watch that delivers nothing.
 - A link to a directory is descended into unless `followSymlinks` is false. `ancestries` keeps the real paths of the
   directories from the root down to each directory, and a link whose real path is already there is reported but not
   descended into, because a link back to an ancestor would loop forever. With `followSymlinks: false` a link is an
@@ -83,8 +95,8 @@ set), `moves.ts` (pairs a removed and an added file by device, inode, size and m
   roots, deeper than `depth`, ignored by path, or below an ignored directory are dropped. The ordinary scan then does
   the diff in the `seed` mode, which `since` (even `null` or an unusable one) selects, so it overrides `ignoreInitial`.
   `seed` is `initial` that also reports `change` and `unlink` at once, because they must come before `ready`; `add()`
-  keeps its own mode (`quiet` with `ignoreInitial`, else `initial`), where a `change` is still announced after the quiet
-  period (or `awaitWriteFinish`) and an `unlink` is still held for `atomic`. A `Settling` job for a change keeps `before`, the entry
+  keeps its own mode (`quiet` with `ignoreInitial`, else `initial`), where a `change` is still announced by `pending.ts`
+  (or `awaitWriteFinish`) and an `unlink` is still held for `atomic`. A `Settling` job for a change keeps `before`, the entry
   that was last reported, and a held unlink in `unlinks` (`pending.ts`) keeps its entry; `snapshot()` (and `close()`, which restores
   them) records those, so a change or unlink that was never reported is reported by the next run. A path whose `add`
   is still waiting is left out. Seeding keeps an entry only if its parent is a kept directory, so no entry sits below one that is
