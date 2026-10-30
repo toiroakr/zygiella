@@ -954,6 +954,20 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     );
   }
 
+  /**
+   * What a read of `dir` has to wait for: the scans of the roots above it that are still going on. Such a scan reads
+   * `dir` too and records what it finds, so a read that came from an event and ran meanwhile would see the entries that
+   * the scan has not recorded yet as new, and report them, although `ignoreInitial` says not to.
+   */
+  function scansAbove(dir: string): Promise<unknown> | undefined {
+    const scans: Array<Promise<unknown>> = [];
+    for (const root of watchedRoots) {
+      const scan = within(root, dir) ? queues.get(`root:${root}`)?.done : undefined;
+      if (scan) scans.push(scan);
+    }
+    return scans.length > 0 ? Promise.all(scans) : undefined;
+  }
+
   function onNative(dir: string, name?: string): void {
     if (closed) return;
     const left = depthLeft.get(dir);
@@ -970,7 +984,10 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       ![...probes.values()].includes(dir) &&
       !watchedRoots.has(join(dir, name))
     ) {
-      void serial(`entry:${join(dir, name)}`, () => syncName(dir, name, left, "live", ancestry));
+      void serial(`entry:${join(dir, name)}`, async () => {
+        await scansAbove(dir);
+        await syncName(dir, name, left, "live", ancestry);
+      });
       audit(dir);
       return;
     }
@@ -985,7 +1002,10 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       if (affected) void serial(`root:${root}`, () => syncRoot(root, "live"));
     }
     if (left !== undefined && ancestry && !watchedRoots.has(dir))
-      void serial(`dir:${dir}`, () => syncDir(dir, left, "live", ancestry));
+      void serial(`dir:${dir}`, async () => {
+        await scansAbove(dir);
+        await syncDir(dir, left, "live", ancestry);
+      });
   }
   const watcher = Object.defineProperties(emitter, {
     ready: { get: () => ready, configurable: true },

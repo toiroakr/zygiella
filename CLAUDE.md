@@ -55,6 +55,10 @@ set), `moves.ts` (pairs a removed and an added file by device, inode, size and m
   missing-path probes are synced too), which repairs an event the OS lost when others of that directory arrived.
   `isLarge` counts tracked entries, so entries under `ignored` do not count. A full read and a named read of one
   directory run in different queues; `scanning` makes the full read keep what a named read recorded meanwhile.
+  A read that an event starts (`onNative`: the full read of a directory, or a named read) waits for the scans of the roots above
+  it that are still going on (`scansAbove`), because such a scan reads the directory too: a `live` read in between would see
+  the entries that the scan has not recorded yet as new and report them, with `ignoreInitial` as well. chokidar does the
+  same by serializing the work per root and replaying what arrives during a scan after it. `test/initial-scan-race.test.ts`.
 - A native watcher error is retried by one re-sync of its directory (a read of everything for a tree watch), except `EMFILE` / `ENOSPC` and the fourth error
   in a row without an event (`native.ts`), after which only `rescan()` lets that path be watched again (`retry`; releasing it with `unwatch()` forgets it too), and nothing below a root whose tree watch was given up is watched one by one until then (`blockedTrees`); the state is recorded before the `error` event is emitted; a re-watch after `EMFILE` on macOS made libuv rebuild its one stream for
   every handle, and the process never reached `ready`.
