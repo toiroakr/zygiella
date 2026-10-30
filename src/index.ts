@@ -1000,7 +1000,10 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     ) {
       void serial(`entry:${join(dir, name)}`, async () => {
         await scansAbove(dir);
-        await syncName(dir, name, left, "live", ancestry);
+        // the scan waited for may have removed the directory or retargeted the link above it
+        const now = depthLeft.get(dir);
+        const path = ancestries.get(dir);
+        if (now !== undefined && path) await syncName(dir, name, now, "live", path);
       });
       audit(dir);
       return;
@@ -1018,7 +1021,9 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     if (left !== undefined && ancestry && !watchedRoots.has(dir))
       void serial(`dir:${dir}`, async () => {
         await scansAbove(dir);
-        await syncDir(dir, left, "live", ancestry);
+        const now = depthLeft.get(dir);
+        const path = ancestries.get(dir);
+        if (now !== undefined && path) await syncDir(dir, now, "live", path);
       });
   }
   const watcher = Object.defineProperties(emitter, {
