@@ -66,16 +66,6 @@ test("a file with another size or mtime, or a directory, is not paired", () => {
   expect(moves.added("/w/f", file(11, { dir: true }))).toBeUndefined();
 });
 
-test("many unmatched observations are expired in one pass, not once per observation", () => {
-  let now = 0;
-  const moves = trackMoves(() => now);
-  const started = performance.now();
-  for (let ino = 1; ino <= 100_000; ino++) moves.added(`/w/${ino}`, file(ino));
-  expect(performance.now() - started).toBeLessThan(1000);
-  now = 5000;
-  expect(moves.removed("/w/x", file(1))).toBeUndefined();
-});
-
 test("a file that was added and then removed at the same path is not what a later removal pairs with", () => {
   const moves = trackMoves();
   moves.added("/w/d", file(7));

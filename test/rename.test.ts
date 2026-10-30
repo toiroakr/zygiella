@@ -164,5 +164,6 @@ describe.skipIf(process.platform === "win32")("a directory that is moved", () =>
       ["add", join(dir, "new", "a.txt"), { renamedFrom: join(dir, "old", "a.txt") }],
     ]);
     expect(named(seen, "addDir")).toEqual([["addDir", join(dir, "new")]]);
+    expect(named(seen, "unlinkDir")).toEqual([["unlinkDir", join(dir, "old")]]);
   });
 });
