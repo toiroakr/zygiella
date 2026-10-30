@@ -232,7 +232,7 @@ simply stays silent, so no directory is in `unwatched`, and reading only those w
 `rescan()` yourself; it also tries to watch those directories again, and so does the timer.
 
 `rescan()` resolves once the directories have been read. `add` and `change` are reported once the file has
-content (or after `awaitWriteFinish`), so they can arrive after the promise resolves. A `rescan()` call made while
+content (an `add` after the directory reads that are going on, 50 ms at most; or after `awaitWriteFinish`), so they can arrive after the promise resolves. A `rescan()` call made while
 a read is running does not report the same change twice, and after `close()` it does nothing. Every read covers the
 whole tree, so keep the interval long for a large one. `rescanInterval` must be a number from 0 to 2147483647; any other number, and any value that is not a number
 (including `false` and a numeric string), throws a `RangeError`. `undefined` and `null` mean the default, 0.
@@ -279,17 +279,19 @@ await watcher.close();
   `unlink`; so is a path deeper than `depth` now. Turning `followSymlinks` off makes what was below a link count as
   removed.
 - The snapshot is what has been reported so far. A file whose `add` is still waiting (for the directory reads that are going on, 10 ms for an empty
-  file, or `awaitWriteFinish`) is left out, so the next start reports it as `add`. A `change` that is waiting, or an `unlink`
+  file, 50 ms for a file that was gone at its first read, or `awaitWriteFinish`) is left out, so the next start reports it as `add`. A `change` that is waiting, or an `unlink`
   held back by `atomic`, is recorded as it was before, so the next start reports `change` or `unlink`. This also holds
   for `snapshot()` called after `close()`.
 
 ## Behavior
 
-- `add` and `change` are reported at once when the file has content. An empty file is held for 10 ms for its data (Linux
-  reports a write as truncate then write, and a new file as create then write). Events for a file that was reported less
-  than 50 ms ago are reported once more, 50 ms after the last of them, so a file that is written in two steps is reported
-  as `add` (or `change`) with the content so far and then as `change` with the rest. Use `awaitWriteFinish` to wait for the
-  whole file; it replaces these waits.
+- `add` and `change` are reported as soon as the file has content. An `add` first waits for the directory reads that
+  are going on, 50 ms at most, so that a move can be paired (see `renamedFrom` below). An empty file is held for 10 ms for
+  its data (Linux reports a write as truncate then write, and a new file as create then write), and a file that was gone at
+  its first read for 50 ms. What is reported less than 50 ms after the previous report of the same file is reported once
+  more, 50 ms after its last event. A file that is written in two steps is therefore reported as `add` (or `change`) with
+  the content so far and then as `change` with the rest, or as one `add` when both steps are done before the file is read.
+  Use `awaitWriteFinish` to wait for the whole file; it replaces these waits.
 - A directory whose inode number changed between two reads is another directory under the same name (`mv src
   src.old` and then `mv staging src`): it is reported as `unlinkDir` with what was in it as `unlink`, then as
   `addDir` with what is in it now as `add`. A file system that reports inode 0 cannot tell, and a freed inode
@@ -322,7 +324,7 @@ await watcher.close();
   `addDir` carries nothing). It is best effort, and `renamedFrom` is absent when the file system reports inode 0, when
   the move crosses file systems (the inode changes), when the file is written, or replaced by another file, before
   its `add` is reported, when the two halves are noticed more than 1 s apart, when the `add` was already reported by
-  the time the removal is noticed (a directory read that takes longer than 50 ms, or a directory of more than 1000 entries, whose entries are read one by one), and for what is reported before
+  the time the removal is noticed (a directory read that takes longer than 50 ms, a read of the directory of the old path that had not started yet when the `add` was announced, which is the case of a move to another directory whose events arrive apart, or a directory of more than 1000 entries, whose entries are read one by one), and for what is reported before
   `ready` after `since` (an entry restored from a snapshot gets its device at the first read, so a move after `ready` is paired). A file that is replaced in place (`atomic`) stays one `change`, and so is the old path of a move when another file is created there before the held `unlink` is released (the `atomic` window, counted from when the removal is noticed): that `unlink` is not reported, only a `change`.
 - A symbolic link to a directory is reported as `addDir` and descended into, and what is below it is reported under
   the link's path. The real path of every directory on the way down is remembered, and a link to one of them is
@@ -368,7 +370,7 @@ await watcher.close();
   `touch` that changes only the modification time is reported as `change`; a `chmod` that changes only the
   permissions is not reported. Nothing tells a content change from a time change.
 - There is no rename event, and no separate event for a move. `mv a.txt b.txt` is reported as `add` of `b.txt` and `unlink` of `a.txt`, two events
-  with their own delays: the `add` is reported when the file has content (or after `awaitWriteFinish`), and the `unlink` is held back for the `atomic`
+  with their own delays: the `add` is reported when the file has content, after the directory reads that are going on (50 ms at most), or after `awaitWriteFinish`, and the `unlink` is held back for the `atomic`
   window (100 ms by default) that starts when the removal is noticed. Which one arrives first is not promised. A moved
   file is the one thing that links them: see `renamedFrom` under [Behavior](#behavior).
 
