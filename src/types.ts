@@ -102,7 +102,7 @@ export interface Entry {
   mtimeMs: number;
   size: number;
   ino: number;
-  /** The device (file system) `ino` belongs to: an inode number is only unique within one device. Not recorded in a snapshot, so unknown for an entry seeded from one until its first read. */
+  /** The device (file system) `ino` belongs to: an inode number is only unique within one device. Not recorded in a snapshot, so unknown for a file seeded from one until its first read; a directory seeded from one stays without it. */
   dev?: number;
   /** Where a link points when it is watched as itself; for a directory, its real path. */
   link?: string;
