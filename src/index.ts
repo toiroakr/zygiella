@@ -34,6 +34,8 @@ const READY_SETTLE_MS = 50;
 const LARGE_DIRECTORY = 1000;
 // such a directory is read whole once its events have stopped for this long, so an event that was lost is repaired
 const AUDIT_QUIET_MS = 1000;
+// how many entries a scan examines at once; more than this keeps RSS up without making the scan faster, as in readdirp
+const SCAN_WORKERS = 256;
 const differs = (previous: Entry, next: Entry): boolean =>
   previous.mtimeMs !== next.mtimeMs ||
   previous.size !== next.size ||
@@ -128,6 +130,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   const reads = new Map<string, Set<{ stale: boolean }>>();
   let rescanTimer: NodeJS.Timeout | undefined;
   let closed = false;
+  let scanBudget = SCAN_WORKERS;
   let ready: Promise<ReadyResult>;
 
   const natives = nativeWatches({
@@ -546,6 +549,26 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     }
   }
 
+  /**
+   * Runs `each` for every name with a few workers that take the next name when they are done, so a directory of
+   * 20,000 files does not hold 20,000 pending calls at once: they stay in the heap after the scan and RSS keeps them.
+   * A directory always gets one worker even when the budget is spent, because the worker that is reading a
+   * subdirectory waits for it, and a read that waited for a free worker could wait for its own parent.
+   */
+  async function eachName(names: readonly string[], each: (name: string) => Promise<unknown>) {
+    const workers = Math.min(names.length, Math.max(1, scanBudget));
+    scanBudget -= workers;
+    let next = 0;
+    const work = async (): Promise<void> => {
+      try {
+        while (next < names.length) await each(names[next++]!);
+      } finally {
+        scanBudget++;
+      }
+    };
+    await Promise.all(Array.from({ length: workers }, work));
+  }
+
   async function readDir(
     dir: string,
     left: number,
@@ -571,8 +594,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     const covered = () => [...watchedRoots].some((root) => within(root, dir));
     const examine = (path: string) =>
       syncEntry(dir, basename(path), left, mode, ancestry, seen, uninspectable);
-    await Promise.all(
-      names.map((name) => syncEntry(dir, name, left, mode, ancestry, seen, uninspectable)),
+    await eachName(names, (name) =>
+      syncEntry(dir, name, left, mode, ancestry, seen, uninspectable),
     );
     if (closed) return;
     const listed = new Set(names);
