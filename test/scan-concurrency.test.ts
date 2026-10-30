@@ -3,8 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-// only lstat and stat are wrapped, to count how many run at once; everything else is the real file system
-const inFlight = vi.hoisted(() => ({ now: 0, max: 0 }));
+// only lstat and stat are wrapped, to count how many run at once and how many ran; everything else is the real file system
+const inFlight = vi.hoisted(() => ({
+  now: 0,
+  max: 0,
+  total: 0,
+  // called with the number of calls so far, so a test can act in the middle of a scan
+  onCall: undefined as ((total: number) => void) | undefined,
+}));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -12,6 +18,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     <T extends (...args: never[]) => Promise<unknown>>(call: T) =>
     (...args: Parameters<T>) => {
       inFlight.max = Math.max(inFlight.max, ++inFlight.now);
+      inFlight.onCall?.(++inFlight.total);
       return (call(...args) as Promise<unknown>).finally(() => inFlight.now--);
     };
   return {
@@ -37,6 +44,8 @@ beforeEach(async () => {
   watcher = undefined;
   inFlight.now = 0;
   inFlight.max = 0;
+  inFlight.total = 0;
+  inFlight.onCall = undefined;
 });
 
 afterEach(async () => {
@@ -84,5 +93,17 @@ describe("the first scan", () => {
     const counts = await scan();
     expect(counts.get("addDir")).toBe(1 + 260 * 2);
     expect(counts.get("add")).toBe(260);
+  });
+
+  test("stops reading the names of a directory once the watcher is closed", async () => {
+    await files(join(dir, "flat"), 1000);
+    const closed = new Promise<void>((done) => {
+      inFlight.onCall = (total) => {
+        if (total === 256) void watcher!.close().then(done);
+      };
+    });
+    watcher = watch(dir, { atomic: false });
+    await closed;
+    expect(inFlight.total).toBeLessThanOrEqual(AT_MOST);
   });
 });

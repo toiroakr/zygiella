@@ -34,7 +34,7 @@ const READY_SETTLE_MS = 50;
 const LARGE_DIRECTORY = 1000;
 // such a directory is read whole once its events have stopped for this long, so an event that was lost is repaired
 const AUDIT_QUIET_MS = 1000;
-// how many entries a scan examines at once; more than this keeps RSS up without making the scan faster, as in readdirp
+// how many entries a scan examines at once on each level of nesting; more than this keeps RSS up without making the scan faster, as in readdirp
 const SCAN_WORKERS = 256;
 const differs = (previous: Entry, next: Entry): boolean =>
   previous.mtimeMs !== next.mtimeMs ||
@@ -549,19 +549,15 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     }
   }
 
-  /**
-   * Runs `each` for every name with a few workers that take the next name when they are done, so a directory of
-   * 20,000 files does not hold 20,000 pending calls at once: they stay in the heap after the scan and RSS keeps them.
-   * A directory always gets one worker even when the budget is spent, because the worker that is reading a
-   * subdirectory waits for it, and a read that waited for a free worker could wait for its own parent.
-   */
+  // One worker is kept even when the budget is spent: the worker reading a subdirectory waits for it, and a read
+  // that waited for a free worker could wait for its own parent.
   async function eachName(names: readonly string[], each: (name: string) => Promise<unknown>) {
     const workers = Math.min(names.length, Math.max(1, scanBudget));
     scanBudget -= workers;
     let next = 0;
     const work = async (): Promise<void> => {
       try {
-        while (next < names.length) await each(names[next++]!);
+        while (next < names.length && !closed) await each(names[next++]!);
       } finally {
         scanBudget++;
       }
