@@ -1,0 +1,59 @@
+name: Bench initial scan
+
+on:
+  push:
+    branches: [ci/bench-initial-scan]
+
+jobs:
+  bench:
+    name: Bench (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          path: before
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: perf/bound-initial-scan-concurrency
+          path: after
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: harness
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: harness/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.0"
+      - name: Build both
+        run: |
+          for side in before after; do
+            (cd "$side" && pnpm install --frozen-lockfile && pnpm build)
+          done
+      - name: Measure
+        run: |
+          echo "os=${{ matrix.os }} node=$(node -v) cpus=$(node -p 'require("os").availableParallelism()')"
+          for round in 1 2 3 4 5 6 7; do
+            for shape in balanced wide deep; do
+              for side in before after; do
+                printf '%s ' "$side"
+                node --expose-gc harness/bench/shapes.mjs "$PWD/$side/dist/index.mjs" "$shape"
+              done
+            done
+          done | tee result.txt
+          {
+            echo '```'
+            cat result.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
