@@ -426,6 +426,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
    * a file made right after the first read of the root is never reported: one more read, when delivery has started.
    */
   function readAgainOnceDelivering(root: string): void {
+    // a scan that was still reading when close() was called must not schedule anything
+    if (closed) return;
     const timer = timeout(() => {
       rereads.delete(timer);
       if (!closed && watchedRoots.has(root)) void readAgain([root]);
