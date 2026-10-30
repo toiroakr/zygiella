@@ -1,10 +1,10 @@
 import { mkdir, mkdtemp, realpath, rm as removeOnce, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 // the native `change` listeners are captured so that the test delivers an event itself, as FSEvents does for what was
-// created just before watching, and the first listing of one directory is held back after it was read
+// created just before watching
 const native = vi.hoisted(() => ({
   listeners: [] as Array<{
     path: string;
@@ -53,7 +53,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
         path,
         ...rest,
       );
-      if (String(path).startsWith(`${native.watchedSub}/`)) native.lstated++;
+      if (dirname(String(path)) === native.watchedSub) native.lstated++;
       return info;
     }) as typeof actual.lstat,
     readdir: (async (path: string, ...rest: unknown[]) => {
@@ -128,11 +128,9 @@ describe("a native event that arrives while the first scan of a directory is rea
     watchers.push(w);
     const seen: Array<[string, string]> = [];
     w.on("all", (event, path) => seen.push([event, path]));
-    // the first scan has listed `sub` and is held back before it records anything
     await until(() => native.hold!.reached);
     deliver("f0");
-    // a read of `sub` that is not held back lists it again and reads its entries, which nobody has recorded yet; one that
-    // waits for the first scan does not start, so this gives up after a moment instead of failing
+    // not `until`: a read that waits for the first scan never reads an entry, so there is nothing to wait for
     const deadline = Date.now() + 200;
     while (native.lstated < 30 && Date.now() < deadline)
       await new Promise((r) => setTimeout(r, 10));
@@ -140,5 +138,28 @@ describe("a native event that arrives while the first scan of a directory is rea
     await new Promise<void>((r) => w.once("ready", () => r()));
     await until(() => (native.reads.get(sub) ?? 0) >= 2);
     expect(seen).toEqual([]);
+  });
+
+  test("is not held back by a rescan of the root, which records nothing new", async () => {
+    const w = watch(dir, { ignoreInitial: true, atomic: false });
+    watchers.push(w);
+    await new Promise<void>((r) => w.once("ready", () => r()));
+    let release!: () => void;
+    native.hold = {
+      path: dir,
+      reached: false,
+      promise: new Promise<void>((resolve) => (release = resolve)),
+    };
+    const rescan = w.rescan();
+    try {
+      await until(() => native.hold!.reached);
+      const before = native.reads.get(sub) ?? 0;
+      deliver("f0");
+      await until(() => (native.reads.get(sub) ?? 0) > before);
+    } finally {
+      // close() in afterEach waits for the read that is held back
+      release();
+    }
+    await rescan;
   });
 });

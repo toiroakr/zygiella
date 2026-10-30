@@ -108,6 +108,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   const watchedRoots = new Set<string>();
   const kinds = new Map<string, "dir" | "file" | "missing">();
   const probes = new Map<string, string>();
+  /** The roots whose scan is making the baseline (`quiet`, `initial` or `seed`) right now. */
+  const baselines = new Set<string>();
   const rereads = new Set<NodeJS.Timeout>();
   const entries = new Map<string, Entry>();
   const children = new Map<string, Set<string>>();
@@ -392,6 +394,16 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   }
 
   async function syncRoot(root: string, mode: Mode): Promise<void> {
+    if (mode === "live") return readRoot(root, mode);
+    baselines.add(root);
+    try {
+      await readRoot(root, mode);
+    } finally {
+      baselines.delete(root);
+    }
+  }
+
+  async function readRoot(root: string, mode: Mode): Promise<void> {
     if (closed || !watchedRoots.has(root)) return;
     if (ignored.byPath(root)) return;
     const previousProbe = probes.get(root);
@@ -955,14 +967,16 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   }
 
   /**
-   * What a read of `dir` has to wait for: the scans of the roots above it that are still going on. Such a scan reads
-   * `dir` too and records what it finds, so a read that came from an event and ran meanwhile would see the entries that
-   * the scan has not recorded yet as new, and report them, although `ignoreInitial` says not to.
+   * What a read of `dir` has to wait for: the scans of the roots above it that make the baseline (not a `live` one, which
+   * only compares with it). Such a scan reads `dir` too and records what it finds, so a read that came from an event and
+   * ran meanwhile would see the entries that the scan has not recorded yet as new, and report them, although
+   * `ignoreInitial` says not to.
    */
   function scansAbove(dir: string): Promise<unknown> | undefined {
     const scans: Array<Promise<unknown>> = [];
     for (const root of watchedRoots) {
-      const scan = within(root, dir) ? queues.get(`root:${root}`)?.done : undefined;
+      const scan =
+        baselines.has(root) && within(root, dir) ? queues.get(`root:${root}`)?.done : undefined;
       if (scan) scans.push(scan);
     }
     return scans.length > 0 ? Promise.all(scans) : undefined;
