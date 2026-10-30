@@ -320,7 +320,7 @@ await watcher.close();
   the move crosses file systems (the inode changes), when the file is written, or replaced by another file, before
   its `add` is reported, when the two halves are noticed more than 1 s apart, when the `add` was already reported by
   the time the removal is noticed (a directory that takes longer than 50 ms to read), and for what is reported before
-  `ready` after `since` (an entry restored from a snapshot gets its device at the first read, so a move after `ready` is paired). A file that is replaced in place (`atomic`) stays one `change`.
+  `ready` after `since` (an entry restored from a snapshot gets its device at the first read, so a move after `ready` is paired). A file that is replaced in place (`atomic`) stays one `change`, and so is a path that gets another file within the `atomic` window after a move: its `unlink` is not reported, only a `change`.
 - A symbolic link to a directory is reported as `addDir` and descended into, and what is below it is reported under
   the link's path. The real path of every directory on the way down is remembered, and a link to one of them is
   reported but not descended into, so a link back to an ancestor does not loop. Pointing a followed link at another

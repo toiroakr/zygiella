@@ -49,9 +49,13 @@ test.skipIf(process.platform === "win32")(
   async () => {
     const seen = await start();
     await chmod(join(dir, "a.txt"), 0o600);
-    // the file made afterwards is reported only after the event of the chmod was handled
+    // the files made afterwards are reported only after the event of the chmod was handled, and a change would come before the second
     await writeFile(join(dir, "b.txt"), "1");
-    await until(() => seen.length > 0);
-    expect(seen).toEqual([["add", join(dir, "b.txt")]]);
+    await writeFile(join(dir, "c.txt"), "2");
+    await until(() => seen.some(([event, path]) => event === "add" && path === join(dir, "c.txt")));
+    expect(seen).toEqual([
+      ["add", join(dir, "b.txt")],
+      ["add", join(dir, "c.txt")],
+    ]);
   },
 );
