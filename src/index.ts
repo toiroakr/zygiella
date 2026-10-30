@@ -552,12 +552,13 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   // Reads that still have names and fewer workers than they could use, oldest first; a freed worker goes to the first.
   // A read that fixed its workers when it started would stay at one for a large directory that began while the
   // budget was spent, and its names would be read one by one though the others have finished.
-  const growable: Array<{ more: () => boolean; add: () => void }> = [];
+  const growable = new Set<{ more: () => boolean; add: () => void }>();
 
   function lend(): void {
-    while (scanBudget > 0 && growable.length) {
-      const read = growable[0]!;
-      if (!read.more()) growable.shift();
+    while (scanBudget > 0) {
+      const read = growable.values().next().value;
+      if (!read) return;
+      if (!read.more()) growable.delete(read);
       else {
         scanBudget--;
         read.add();
@@ -586,9 +587,13 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     };
     const add = () => void running.push(work());
     for (let i = 0; i < first; i++) add();
-    if (first < names.length) growable.push({ more: () => next < names.length && !closed, add });
+    const read = { more: () => next < names.length && !closed, add };
+    if (first < names.length) growable.add(read);
     // a worker added by `lend` while this waits is pushed to `running`, so the loop reaches it
     for (let i = 0; i < running.length; i++) await running[i];
+    // not left for `lend` to drop: the budget can stay at or below 0 through a long scan, and a finished read would hold
+    // its names and closures all that time
+    growable.delete(read);
     if (failure) throw failure.error;
   }
 
