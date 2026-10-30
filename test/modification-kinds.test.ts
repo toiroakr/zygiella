@@ -49,11 +49,11 @@ test.skipIf(process.platform === "win32")(
   async () => {
     const seen = await start();
     await chmod(join(dir, "a.txt"), 0o600);
-    // the files made afterwards are reported only after the event of the chmod was handled, and a change would come before the second
+    // the files made afterwards are reported only after the event of the chmod was handled; their own order is not fixed
     await writeFile(join(dir, "b.txt"), "1");
     await writeFile(join(dir, "c.txt"), "2");
-    await until(() => seen.some(([event, path]) => event === "add" && path === join(dir, "c.txt")));
-    expect(seen).toEqual([
+    await until(() => seen.length >= 2);
+    expect([...seen].sort((a, b) => String(a[1]).localeCompare(String(b[1])))).toEqual([
       ["add", join(dir, "b.txt")],
       ["add", join(dir, "c.txt")],
     ]);

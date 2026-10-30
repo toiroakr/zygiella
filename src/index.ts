@@ -872,8 +872,13 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   function pairMove(from: string, entry: Entry): void {
     const to = moves.removed(from, entry);
     const current = to === undefined ? undefined : entries.get(to);
-    if (to !== undefined && current?.dev === entry.dev && current?.ino === entry.ino)
-      pending.renamed(to, from);
+    // a file written since it appeared is not the file that was paired, as in `announce`
+    const same =
+      current?.dev === entry.dev &&
+      current?.ino === entry.ino &&
+      current?.size === entry.size &&
+      current?.mtimeMs === entry.mtimeMs;
+    if (to !== undefined && same) pending.renamed(to, from);
   }
 
   function dispatch(event: WatchEvent, path: string, renamedFrom?: string): void {
