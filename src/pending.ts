@@ -4,6 +4,10 @@ import { within } from "./match.ts";
 import type { Entry, WatchEvent } from "./types.ts";
 
 const QUIET_MS = 50;
+/** An add or change that finds an empty file waits this long for the data, because Linux reports truncate before write. */
+const EMPTY_HOLD_MS = 10;
+/** How many times at most a file is read for its first report, when writes keep being announced during the reads. */
+const MAX_FRESH_READS = 3;
 
 interface Settling {
   event: "add" | "change";
@@ -11,6 +15,12 @@ interface Settling {
   before?: Entry;
   /** Where the file of an add that is still waiting was moved from. */
   renamedFrom?: string;
+  /** Still waiting for the first read of the file, which reports at once unless the file is empty. */
+  leading?: boolean;
+  /** An announce came while the first read was in flight, so that read may be older than the write it announced. */
+  dirty?: boolean;
+  /** The entry that the last announce during the first read said was there before its write. */
+  dirtyBefore?: Entry;
   timer?: NodeJS.Timeout;
 }
 
@@ -23,8 +33,10 @@ export interface PendingOptions {
   timeout: (fn: () => void, ms: number) => NodeJS.Timeout;
   dispatch: (event: WatchEvent, path: string, renamedFrom?: string) => void;
   stat: (path: string) => Promise<Stats>;
-  /** The file settled at this size and mtime, which the entry may not know yet. */
-  settled: (path: string, info: Stats, link: string | undefined) => void;
+  /** The file settled at this size and mtime, which the entry may not know yet. Returns the entry as it is recorded now. */
+  settled: (path: string, info: Stats, link: string | undefined) => Entry | undefined;
+  /** What a first report of `path` waits for: the read of its directory, in which a move is paired from both halves. */
+  after?: (path: string) => Promise<unknown> | undefined;
 }
 
 /** Reports that are not made yet: an add / change waiting to settle, and an unlink held back for `atomic`. */
@@ -57,9 +69,12 @@ export function pendingEvents({
   dispatch,
   stat,
   settled,
+  after,
 }: PendingOptions): Pending {
   const settling = new Map<string, Settling>();
   const unlinks = new Map<string, { timer: NodeJS.Timeout; entry: Entry }>();
+  /** Paths that were reported a moment ago: a report for them waits for a quiet period again. */
+  const reportedRecently = new Map<string, NodeJS.Timeout>();
 
   const takeHeld = (path: string): Entry | undefined => {
     const held = unlinks.get(path);
@@ -69,12 +84,19 @@ export function pendingEvents({
     return held.entry;
   };
 
-  return {
+  const api: Pending = {
     holdsUnlinks: atomic > 0,
     announce(event, path, before, renamedFrom) {
       const held = takeHeld(path);
       if (held) event = "change";
       const prior = settling.get(path);
+      if (prior?.leading && !settle) {
+        if (event === "add") prior.event = "add";
+        prior.renamedFrom = undefined;
+        prior.dirty = true;
+        prior.dirtyBefore = before ?? prior.dirtyBefore;
+        return;
+      }
       clearTimeout(prior?.timer);
       const job: Settling = {
         event: prior?.event === "add" ? "add" : event,
@@ -84,19 +106,68 @@ export function pendingEvents({
       };
       settling.set(path, job);
       if (!settle) {
-        // Linux reports a write as truncate then write, and a new file as create then write: one report for the burst
-        job.timer = timeout(async () => {
+        const report = (info: Stats | undefined, link: string | undefined, followed = false) => {
+          settling.delete(path);
+          // a native event for the write that finished meanwhile may arrive later and must not report it again
+          const recorded = info ? settled(path, info, link) : undefined;
+          clearTimeout(reportedRecently.get(path));
+          reportedRecently.set(
+            path,
+            timeout(() => reportedRecently.delete(path), QUIET_MS),
+          );
+          // before the listeners run, so that a listener that stops watching the path or closes the watcher cancels it
+          if (followed) api.announce("change", path, recorded ?? job.dirtyBefore);
+          dispatch(job.event, path, job.event === "add" ? job.renamedFrom : undefined);
+        };
+        const read = async () => {
           const info = await stat(path).catch(() => undefined);
           const link =
             !followSymlinks && info?.isSymbolicLink()
               ? await readlink(path).catch(() => undefined)
               : undefined;
+          return { info, link };
+        };
+        const afterHold = async () => {
+          const { info, link } = await read();
+          if (settling.get(path) === job) report(info, link);
+        };
+        if (reportedRecently.has(path)) {
+          // Linux reports a write as truncate then write, and a new file as create then write: one report for the burst
+          job.timer = timeout(afterHold, QUIET_MS);
+          return;
+        }
+        job.leading = true;
+        void (async () => {
+          // only an add is paired with a removal, so a change has nothing to wait for
+          const waited = job.event === "add" ? after?.(path) : undefined;
+          // a read that does not come back (a slow or stuck directory) must not hold a report longer than the quiet period did
+          if (waited) {
+            await new Promise<void>((resolve) => {
+              job.timer = timeout(resolve, QUIET_MS);
+              void waited.then(
+                () => resolve(),
+                () => resolve(),
+              );
+            });
+            clearTimeout(job.timer);
+            job.timer = undefined;
+          }
           if (settling.get(path) !== job) return;
-          settling.delete(path);
-          // a native event for the write that finished meanwhile may arrive later and must not report it again
-          if (info) settled(path, info, link);
-          dispatch(job.event, path, job.event === "add" ? job.renamedFrom : undefined);
-        }, QUIET_MS);
+          // a read that was in flight when another announce came may have seen the file before that write
+          let result: Awaited<ReturnType<typeof read>>;
+          let fresh = 0;
+          do {
+            job.dirty = false;
+            result = await read();
+            if (settling.get(path) !== job) return;
+          } while (job.dirty && ++fresh < MAX_FRESH_READS);
+          const { info, link } = result;
+          job.leading = false;
+          // writes that go on during every read must not postpone this report, so they follow as a change
+          if (info && info.size > 0) report(info, link, job.dirty);
+          // a file that is gone may be taken back by the removal that is being read, so it gets the longer wait
+          else job.timer = timeout(afterHold, info ? EMPTY_HOLD_MS : QUIET_MS);
+        })();
         return;
       }
       let last: string | undefined;
@@ -154,6 +225,8 @@ export function pendingEvents({
       const job = settling.get(path);
       clearTimeout(job?.timer);
       settling.delete(path);
+      clearTimeout(reportedRecently.get(path));
+      reportedRecently.delete(path);
       return job;
     },
     baseline(path, current) {
@@ -170,6 +243,8 @@ export function pendingEvents({
         else entries.delete(path);
       }
       settling.clear();
+      for (const timer of reportedRecently.values()) clearTimeout(timer);
+      reportedRecently.clear();
       for (const [path, { timer, entry }] of unlinks) {
         clearTimeout(timer);
         entries.set(path, entry);
@@ -177,4 +252,5 @@ export function pendingEvents({
       unlinks.clear();
     },
   };
+  return api;
 }
