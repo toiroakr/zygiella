@@ -142,7 +142,7 @@ async function run(scenario, name, libs, dist, work) {
     const rss0 = process.memoryUsage().rss;
     let events = 0;
     let peak = rss0;
-    const timer = setInterval(() => (peak = Math.max(peak, process.memoryUsage().rss)), 2);
+    const timer = setInterval(() => (peak = Math.max(peak, process.memoryUsage.rss())), 2);
     const start = performance.now();
     const w = make(root, { initial });
     w.on(() => events++);

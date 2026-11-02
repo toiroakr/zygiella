@@ -14,7 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { brotliCompressSync, gzipSync } from "node:zlib";
+import { brotliCompressSync, gunzipSync, gzipSync } from "node:zlib";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const args = Object.fromEntries(
@@ -61,6 +61,18 @@ const summarize = (values) => ({
   max: Math.max(...values),
 });
 
+// the sum of the file sizes in a .tgz, read from its tar headers (pnpm pack does not report it)
+function unpackedSize(tgz) {
+  const tar = gunzipSync(tgz);
+  let total = 0;
+  for (let at = 0; at + 512 <= tar.length && tar[at] !== 0;) {
+    const size = parseInt(tar.toString("ascii", at + 124, at + 136).trim(), 8);
+    total += size;
+    at += 512 + Math.ceil(size / 512) * 512;
+  }
+  return total;
+}
+
 function sizes() {
   const files = readdirSync(dist).filter((name) => statSync(join(dist, name)).isFile());
   const out = { files: {}, totalBytes: 0, totalGzip: 0, totalBrotli: 0 };
@@ -80,7 +92,13 @@ function sizes() {
     try {
       const output = execFileSync(
         "pnpm",
-        ["pack", "--json", "--ignore-scripts", "--pack-destination", target],
+        [
+          "pack",
+          "--json",
+          "--ignore-scripts",
+          "--pack-destination",
+          process.platform === "win32" ? `"${target}"` : target,
+        ],
         {
           cwd: root,
           encoding: "utf8",
@@ -91,10 +109,7 @@ function sizes() {
       // lifecycle scripts such as `prepare` may print before the JSON
       const pack = JSON.parse(output.slice(output.indexOf("{")));
       out.tarballBytes = statSync(pack.filename).size;
-      out.unpackedBytes = pack.files.reduce(
-        (sum, file) => sum + statSync(join(root, file.path)).size,
-        0,
-      );
+      out.unpackedBytes = unpackedSize(readFileSync(pack.filename));
     } finally {
       rmSync(target, { recursive: true, force: true });
     }

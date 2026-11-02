@@ -129,8 +129,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   let retryLimits = false;
   /** Set once a `remove` kept entries below the path it removed: `children` may not reach them from the path any more. */
   let orphans = false;
-  /** The entries whose parent was not an entry when they were set (watched roots): no edge of `children` leads to them. */
-  const detached = new Set<string>();
+  /** The directories above the parent of a watched root that had no entry for its parent: setting one of them leaves a gap in `children`. */
+  const gapAbove = new Set<string>();
   const audits = new Map<string, NodeJS.Timeout>();
   /** For each directory the full reads going through it, each with the paths a named entry read recorded meanwhile. */
   const scanning = new Map<string, Set<Set<string>>>();
@@ -915,15 +915,13 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     const parent = dirname(path);
     // a root has its own name as its parent, and listing it among its children would make `below` walk it forever
     if (parent === path) return;
-    if (!entries.has(parent)) {
-      detached.add(path);
-      for (let above = dirname(parent); !orphans; above = dirname(above)) {
+    if (!entries.has(parent))
+      for (let above = dirname(parent); ; above = dirname(above)) {
         if (entries.has(above)) orphans = true;
+        else gapAbove.add(above);
         if (dirname(above) === above) break;
       }
-    }
-    for (const root of detached)
-      if (root !== path && within(path, root) && !entries.has(dirname(root))) orphans = true;
+    if (gapAbove.has(path)) orphans = true;
     let siblings = children.get(parent);
     if (!siblings) children.set(parent, (siblings = new Set()));
     siblings.add(path);
@@ -974,7 +972,6 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       const entry = entries.get(key)!;
       const job = pending.cancel(key);
       entries.delete(key);
-      detached.delete(key);
       staleReads(key);
       denied.delete(key);
       children.get(dirname(key))?.delete(key);
