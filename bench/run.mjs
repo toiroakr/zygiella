@@ -26,7 +26,7 @@ const dist = resolve(args.dist ?? join(here, "..", "dist"));
 const runs = Number(args.runs ?? 5);
 if (!Number.isInteger(runs) || runs < 1) throw new Error("--runs must be an integer of 1 or more");
 const only = args.only?.split(",");
-const work = join(tmpdir(), "zygiella-bench");
+const work = mkdtempSync(join(tmpdir(), "zygiella-bench-"));
 const entry = join(dist, "index.mjs");
 
 const SCENARIOS = [
@@ -170,7 +170,6 @@ function safeRead(file) {
   }
 }
 
-mkdirSync(work, { recursive: true });
 // with --only and an existing --out, the scenarios that are not run again keep their numbers, so a long run can be split
 const previous = args.out && only ? safeRead(resolve(args.out)) : undefined;
 for (const key of ["node", "platform", "arch", "runs"])

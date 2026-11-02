@@ -5,6 +5,7 @@
 import { spawnSync } from "node:child_process";
 import {
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -171,6 +172,10 @@ async function run(scenario, name, libs, dist, work) {
     return mem(false, 0);
   }
   tree(root, { fanout: 8, depth: 3, perDir: 10 });
+  // made before the watcher starts, so its creation is not an event of the measurement and the watcher has it in its baseline
+  const target = join(root, "bulk");
+  if (scenario === "bulk-unlink") wide(target, 3000);
+  if (scenario === "bulk-add") mkdirSync(target);
   const w = make(root, { initial: false });
   const counts = { add: 0, change: 0, unlink: 0 };
   // the paths, not the number of events: a library that reports one file as add and then change would count it twice
@@ -185,19 +190,12 @@ async function run(scenario, name, libs, dist, work) {
   await sleep(100);
   try {
     if (scenario === "bulk-unlink") {
-      const target = join(root, "bulk");
-      wide(target, 3000);
-      await sleep(400);
-      unlinked.clear();
       const start = performance.now();
       for (const f of readdirSync(target)) rmSync(join(target, f));
       await until(() => unlinked.size >= 3000);
       return { ms: performance.now() - start };
     }
     if (scenario === "bulk-add") {
-      const target = join(root, "bulk");
-      mkdirSync(target);
-      await sleep(200);
       const start = performance.now();
       for (let i = 0; i < 3000; i++) writeFileSync(join(target, `n${i}.txt`), String(i));
       await until(() => added.size >= 3000);
@@ -243,7 +241,7 @@ if (mode === "run") {
     );
   const libs = resolve(flags.libs);
   const dist = join(here, "..", "dist", "index.mjs");
-  const work = join(tmpdir(), "zygiella-bench-libs");
+  const work = mkdtempSync(join(tmpdir(), "zygiella-bench-libs-"));
   const scenarios = flags.only?.split(",") ?? SCENARIOS;
   const names = flags.libnames?.split(",") ?? Object.keys(LIBS);
   for (const scenario of scenarios) {
@@ -279,4 +277,5 @@ if (mode === "run") {
       );
     }
   }
+  rmSync(work, { recursive: true, force: true });
 }
