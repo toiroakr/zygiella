@@ -1,6 +1,6 @@
 // Compares zygiella with other file watchers that are installed next to it, each in a fresh process.
 //   node bench/libs.mjs run <scenario> <lib> <libs dir> <dist/index.mjs> <work dir>   (one measurement, JSON)
-//   node bench/libs.mjs all [--runs 5] [--libs <dir>] [--only a,b]                    (table of medians)
+//   node bench/libs.mjs all [--runs 5] --libs <dir> [--only a,b] [--libnames x,y]     (table of medians)
 // <libs dir> holds one folder per library with its own node_modules (see LIBS below).
 import { spawnSync } from "node:child_process";
 import {
@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { parseFlags, parseList } from "./args.mjs";
 import { tree, wide } from "./fixture.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -234,9 +235,7 @@ if (mode === "run") {
   rmSync(work, { recursive: true, force: true });
   process.exit(0);
 } else if (mode === "all") {
-  const flags = Object.fromEntries(
-    rest.flatMap((a, i) => (a.startsWith("--") ? [[a.slice(2), rest[i + 1]]] : [])),
-  );
+  const flags = parseFlags(rest, ["runs", "libs", "only", "libnames"]);
   const runs = Number(flags.runs ?? 5);
   if (!Number.isInteger(runs) || runs < 1)
     throw new Error("--runs must be an integer of 1 or more");
@@ -247,8 +246,8 @@ if (mode === "run") {
   const libs = resolve(flags.libs);
   const dist = join(here, "..", "dist", "index.mjs");
   const work = mkdtempSync(join(tmpdir(), "zygiella-bench-libs-"));
-  const scenarios = flags.only?.split(",") ?? SCENARIOS;
-  const names = flags.libnames?.split(",") ?? Object.keys(LIBS);
+  const scenarios = parseList(flags.only, SCENARIOS, "--only") ?? SCENARIOS;
+  const names = parseList(flags.libnames, Object.keys(LIBS), "--libnames") ?? Object.keys(LIBS);
   for (const scenario of scenarios) {
     console.log(`\n## ${scenario}`);
     for (const name of names) {

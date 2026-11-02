@@ -15,17 +15,13 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { brotliCompressSync, gunzipSync, gzipSync } from "node:zlib";
+import { parseFlags, parseList } from "./args.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const args = Object.fromEntries(
-  process.argv
-    .slice(2)
-    .flatMap((arg, i, all) => (arg.startsWith("--") ? [[arg.slice(2), all[i + 1]]] : [])),
-);
+const args = parseFlags(process.argv.slice(2), ["dist", "runs", "only", "out"]);
 const dist = resolve(args.dist ?? join(here, "..", "dist"));
 const runs = Number(args.runs ?? 5);
 if (!Number.isInteger(runs) || runs < 1) throw new Error("--runs must be an integer of 1 or more");
-const only = args.only?.split(",");
 const work = mkdtempSync(join(tmpdir(), "zygiella-bench-"));
 const entry = join(dist, "index.mjs");
 
@@ -47,6 +43,7 @@ const SCENARIOS = [
   "many-watchers",
   "snapshot",
 ];
+const only = parseList(args.only, SCENARIOS, "--only");
 // numbers that describe the fixture or check the result, not a cost
 const NOT_A_COST = new Set(["files", "entries", "paired"]);
 
