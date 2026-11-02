@@ -2,7 +2,7 @@
 // the same way, and prints the median of each metric:
 //   node bench/ab.mjs <dist A> <dist B> [--runs 9] [--only scan-tree,bulk-unlink]
 import { spawnSync } from "node:child_process";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,11 +16,11 @@ const flags = Object.fromEntries(
 const runs = Number(flags.runs ?? 9);
 const names = (
   flags.only ??
-  "scan-tree,scan-wide,scan-tree-quiet,scan-tree-ignored,rescan,bulk-unlink,bulk-add,remove-directory,rename-burst,change-latency,add-latency,snapshot,many-watchers"
+  "scan-tree,scan-wide,scan-tree-quiet,scan-tree-ignored,rescan,bulk-unlink,bulk-add,remove-directory,rename-burst,change-latency,add-latency,change-medium,scan-big-then-small,snapshot,many-watchers"
 ).split(",");
 const NOT_A_COST = new Set(["files", "entries", "paired"]);
-const work = join(tmpdir(), "zygiella-bench-ab");
-mkdirSync(work, { recursive: true });
+if (!Number.isInteger(runs) || runs < 1) throw new Error("--runs must be an integer of 1 or more");
+const work = mkdtempSync(join(tmpdir(), "zygiella-bench-ab-"));
 
 const median = (values) => {
   const sorted = [...values].sort((x, y) => x - y);
@@ -39,30 +39,33 @@ const once = (name, dist) => {
 const fmt = (n) =>
   Math.abs(n) >= 1000 ? n.toFixed(0) : Math.abs(n) >= 10 ? n.toFixed(1) : n.toFixed(2);
 
-for (const name of names) {
-  const samples = { A: {}, B: {} };
-  for (let i = 0; i < runs; i++) {
-    for (const [label, dist] of i % 2
-      ? [
-          ["B", b],
-          ["A", a],
-        ]
-      : [
-          ["A", a],
-          ["B", b],
-        ]) {
-      for (const [key, value] of Object.entries(once(name, dist)))
-        if (!NOT_A_COST.has(key)) (samples[label][key] ??= []).push(value);
+try {
+  for (const name of names) {
+    const samples = { A: {}, B: {} };
+    for (let i = 0; i < runs; i++) {
+      for (const [label, dist] of i % 2
+        ? [
+            ["B", b],
+            ["A", a],
+          ]
+        : [
+            ["A", a],
+            ["B", b],
+          ]) {
+        for (const [key, value] of Object.entries(once(name, dist)))
+          if (!NOT_A_COST.has(key)) (samples[label][key] ??= []).push(value);
+      }
+    }
+    for (const key of Object.keys(samples.A)) {
+      const x = median(samples.A[key]);
+      const y = median(samples.B[key]);
+      const change = y === x ? 0 : (y - x) / Math.abs(x);
+      const mark = change > 0.05 ? "  WORSE" : change < -0.05 ? "  better" : "";
+      console.log(
+        `${`${name}.${key}`.padEnd(34)} ${fmt(x).padStart(9)} -> ${fmt(y).padStart(9)} ${(change * 100).toFixed(1).padStart(7)}%${mark}`,
+      );
     }
   }
-  for (const key of Object.keys(samples.A)) {
-    const x = median(samples.A[key]);
-    const y = median(samples.B[key]);
-    const change = x === 0 ? 0 : (y - x) / x;
-    const mark = change > 0.05 ? "  WORSE" : change < -0.05 ? "  better" : "";
-    console.log(
-      `${`${name}.${key}`.padEnd(34)} ${fmt(x).padStart(9)} -> ${fmt(y).padStart(9)} ${(change * 100).toFixed(1).padStart(7)}%${mark}`,
-    );
-  }
+} finally {
+  rmSync(work, { recursive: true, force: true });
 }
-rmSync(work, { recursive: true, force: true });

@@ -37,7 +37,8 @@ const LARGE_DIRECTORY = 1000;
 const AUDIT_QUIET_MS = 1000;
 // how many entries a scan examines at once on each level of nesting. The thread pool runs UV_THREADPOOL_SIZE calls at a
 // time (4 unless set), so requests queued beyond a few times that only keep their promises and results in memory: 16
-// instead of 256 cut the resident set of a scan by up to 20% and did not make `ready` later. A larger pool gets a deeper queue.
+// instead of 256 cut the resident set of a scan by up to 20% and did not make `ready` later. A pool of 1 to 3 threads keeps the
+// floor of 16, which was the measured case, and a larger pool gets a deeper queue.
 const SCAN_WORKERS = Math.min(256, Math.max(16, 4 * (Number(process.env.UV_THREADPOOL_SIZE) || 4)));
 const differs = (previous: Entry, next: Entry): boolean =>
   previous.mtimeMs !== next.mtimeMs ||
@@ -128,6 +129,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   let retryLimits = false;
   /** Set once a `remove` kept entries below the path it removed: `children` may not reach them from the path any more. */
   let orphans = false;
+  /** The entries whose parent was not an entry when they were set (watched roots): no edge of `children` leads to them. */
+  const detached = new Set<string>();
   const audits = new Map<string, NodeJS.Timeout>();
   /** For each directory the full reads going through it, each with the paths a named entry read recorded meanwhile. */
   const scanning = new Map<string, Set<Set<string>>>();
@@ -910,6 +913,17 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   function setEntry(path: string, entry: Entry): void {
     entries.set(path, entry);
     const parent = dirname(path);
+    // a root has its own name as its parent, and listing it among its children would make `below` walk it forever
+    if (parent === path) return;
+    if (!entries.has(parent)) {
+      detached.add(path);
+      for (let above = dirname(parent); !orphans; above = dirname(above)) {
+        if (entries.has(above)) orphans = true;
+        if (dirname(above) === above) break;
+      }
+    }
+    for (const root of detached)
+      if (root !== path && within(path, root) && !entries.has(dirname(root))) orphans = true;
     let siblings = children.get(parent);
     if (!siblings) children.set(parent, (siblings = new Set()));
     siblings.add(path);
@@ -924,14 +938,19 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   function below(path: string, only: (key: string) => boolean): string[] {
     if (orphans) return [...entries.keys()].filter((key) => within(path, key) && only(key));
     const keys: string[] = [];
-    const stack = [path];
-    for (let next = stack.pop(); next !== undefined; next = stack.pop()) {
+    // `cut` says an entry that is removed lies above: `remove` drops its list of children, which strands a refused one below it
+    const stack: [string, boolean][] = [[path, false]];
+    for (let top = stack.pop(); top !== undefined; top = stack.pop()) {
+      const [next, cut] = top;
+      let removed = cut;
       if (entries.has(next)) {
-        if (only(next)) keys.push(next);
-        else orphans = true;
+        if (only(next)) {
+          keys.push(next);
+          removed = true;
+        } else if (cut) orphans = true;
       }
       const names = children.get(next);
-      if (names) for (const child of names) stack.push(child);
+      if (names) for (const child of names) stack.push([child, removed]);
     }
     return keys;
   }
@@ -955,6 +974,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       const entry = entries.get(key)!;
       const job = pending.cancel(key);
       entries.delete(key);
+      detached.delete(key);
       staleReads(key);
       denied.delete(key);
       children.get(dirname(key))?.delete(key);

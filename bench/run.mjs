@@ -2,10 +2,18 @@
 //   node bench/run.mjs [--dist dist] [--runs 5] [--only scan-tree,bulk-unlink] [--out bench/results/name.json]
 // Every number is lower-is-better. Compare two results with `node bench/compare.mjs a.json b.json`.
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { brotliCompressSync, gzipSync } from "node:zlib";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -16,6 +24,7 @@ const args = Object.fromEntries(
 );
 const dist = resolve(args.dist ?? join(here, "..", "dist"));
 const runs = Number(args.runs ?? 5);
+if (!Number.isInteger(runs) || runs < 1) throw new Error("--runs must be an integer of 1 or more");
 const only = args.only?.split(",");
 const work = join(tmpdir(), "zygiella-bench");
 const entry = join(dist, "index.mjs");
@@ -25,12 +34,14 @@ const SCENARIOS = [
   "scan-wide",
   "scan-tree-quiet",
   "scan-tree-ignored",
+  "scan-big-then-small",
   "rescan",
   "bulk-unlink",
   "bulk-add",
   "remove-directory",
   "change-latency",
   "add-latency",
+  "change-medium",
   "rename-burst",
   "churn",
   "many-watchers",
@@ -64,15 +75,29 @@ function sizes() {
   }
   // what npm would publish, when the dist is the one of this package
   if (dist === resolve(here, "..", "dist")) {
-    const output = execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
-      cwd: resolve(here, ".."),
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    // lifecycle scripts such as `prepare` may print before the JSON
-    const [pack] = JSON.parse(output.slice(output.indexOf("[\n")));
-    out.tarballBytes = pack.size;
-    out.unpackedBytes = pack.unpackedSize;
+    const root = resolve(here, "..");
+    const target = mkdtempSync(join(tmpdir(), "zygiella-bench-pack-"));
+    try {
+      const output = execFileSync(
+        "pnpm",
+        ["pack", "--json", "--ignore-scripts", "--pack-destination", target],
+        {
+          cwd: root,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+          shell: process.platform === "win32",
+        },
+      );
+      // lifecycle scripts such as `prepare` may print before the JSON
+      const pack = JSON.parse(output.slice(output.indexOf("{")));
+      out.tarballBytes = statSync(pack.filename).size;
+      out.unpackedBytes = pack.files.reduce(
+        (sum, file) => sum + statSync(join(root, file.path)).size,
+        0,
+      );
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+    }
   }
   return out;
 }
@@ -90,7 +115,7 @@ function importCost() {
   const empty = [];
   const loaded = [];
   const rss = [];
-  const url = JSON.stringify(entry);
+  const url = JSON.stringify(pathToFileURL(entry).href);
   for (let i = 0; i < Math.max(9, runs * 2); i++) {
     empty.push(time("0").ms);
     const run = time(
@@ -133,6 +158,15 @@ function safeRead(file) {
 mkdirSync(work, { recursive: true });
 // with --only and an existing --out, the scenarios that are not run again keep their numbers, so a long run can be split
 const previous = args.out && only ? safeRead(resolve(args.out)) : undefined;
+for (const key of ["node", "platform", "arch", "runs"])
+  if (
+    previous &&
+    previous.meta?.[key] !==
+      (key === "node" ? process.version : key === "runs" ? runs : process[key])
+  )
+    throw new Error(
+      `${args.out} was measured with another ${key} (${previous.meta?.[key]}), so its numbers cannot be kept next to these`,
+    );
 const result = {
   meta: {
     node: process.version,

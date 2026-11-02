@@ -11,7 +11,7 @@ const NOISE = 0.05;
 
 const rows = [];
 const add = (group, metric, a, b) => {
-  if (a === undefined || b === undefined) return;
+  if (a === undefined) return;
   rows.push({ group, metric, a, b });
 };
 for (const key of ["totalBytes", "totalGzip", "totalBrotli", "tarballBytes", "unpackedBytes"])
@@ -26,7 +26,14 @@ const fmt = (n) =>
 const width = Math.max(...rows.map((r) => `${r.group}.${r.metric}`.length));
 let worse = 0;
 for (const { group, metric, a, b } of rows) {
-  const change = a === 0 ? 0 : (b - a) / a;
+  if (b === undefined) {
+    console.log(
+      `${`${group}.${metric}`.padEnd(width)}  ${fmt(a).padStart(10)} -> missing in after`,
+    );
+    continue;
+  }
+  // from 0 any increase is infinite, and a negative baseline must not flip the sign
+  const change = b === a ? 0 : (b - a) / Math.abs(a);
   const mark = change > NOISE ? "  WORSE" : change < -NOISE ? "  better" : "";
   if (change > NOISE) worse++;
   console.log(

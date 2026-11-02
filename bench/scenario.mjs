@@ -28,13 +28,16 @@ const check = (actual, expected, what) => {
 
 // peak of the heap while something runs, sampled between turns of the event loop
 function samplePeak() {
-  let peak = process.memoryUsage().heapUsed;
+  let heap = process.memoryUsage().heapUsed;
+  let rss = process.memoryUsage().rss;
   const timer = setInterval(() => {
-    peak = Math.max(peak, process.memoryUsage().heapUsed);
+    const usage = process.memoryUsage();
+    heap = Math.max(heap, usage.heapUsed);
+    rss = Math.max(rss, usage.rss);
   }, 2);
   return () => {
     clearInterval(timer);
-    return peak;
+    return { heap, rss };
   };
 }
 
@@ -58,13 +61,13 @@ const scenarios = {
   },
   async "scan-tree-ignored"() {
     const shape = tree(join(work, "scan-tree"), TREE);
-    // half of the directories are skipped by a regular expression
-    return scan(
-      join(work, "scan-tree"),
-      { dirs: shape.dirs, files: shape.files },
-      { ignored: /\/d[5-9](\/|$)/ },
-      true,
+    // d5 to d9 are skipped on every level, so only the directories below d0 to d4 are read
+    const ignored = /\/d[5-9](\/|$)/;
+    const root = join(work, "scan-tree");
+    const kept = readdirSync(root, { recursive: true }).filter(
+      (rel) => !ignored.test(`/${rel.replaceAll("\\", "/")}`),
     );
+    return scan(root, { dirs: 0, files: kept.length }, { ignored });
   },
   // the case that the worker budget has to get right: a huge directory first, then many small ones that take every worker
   async "scan-big-then-small"() {
@@ -226,13 +229,15 @@ const scenarios = {
     await watcher.ready;
     let paired = 0;
     let adds = 0;
+    let unlinks = 0;
     watcher.on("add", (_path, details) => {
       adds++;
       if (details?.renamedFrom) paired++;
     });
+    watcher.on("unlink", () => unlinks++);
     const start = performance.now();
     for (let i = 0; i < 2000; i++) renameSync(join(root, `f${i}.txt`), join(root, `g${i}.txt`));
-    await until(() => adds === 2000);
+    await until(() => adds === 2000 && unlinks === 2000);
     const ms = performance.now() - start;
     await watcher.close();
     return { ms, paired };
@@ -299,7 +304,7 @@ const scenarios = {
   },
 };
 
-async function scan(root, shape, options, skipsCount = false) {
+async function scan(root, shape, options) {
   gc();
   const heapBefore = process.memoryUsage().heapUsed;
   const rssBefore = process.memoryUsage().rss;
@@ -311,18 +316,17 @@ async function scan(root, shape, options, skipsCount = false) {
   await watcher.ready;
   const ms = performance.now() - start;
   const peak = stop();
-  const rssPeak = process.resourceUsage().maxRSS * 1024;
   gc();
   const heapAfter = process.memoryUsage().heapUsed;
   const rssAfter = process.memoryUsage().rss;
-  if (!options.ignoreInitial && !skipsCount) check(events, shape.dirs + shape.files + 1, "events");
+  check(events, options.ignoreInitial ? 0 : shape.dirs + shape.files + 1, "events");
   const tracked = Object.values(watcher.getWatched()).reduce((n, names) => n + names.length, 0);
   await watcher.close();
   return {
     readyMs: ms,
     heapMB: (heapAfter - heapBefore) / MB,
-    heapPeakMB: (peak - heapBefore) / MB,
-    rssPeakMB: rssPeak / MB,
+    heapPeakMB: (peak.heap - heapBefore) / MB,
+    rssPeakGrowthMB: (peak.rss - rssBefore) / MB,
     rssGrowthMB: (rssAfter - rssBefore) / MB,
     bytesPerEntry: tracked ? (heapAfter - heapBefore) / tracked : 0,
   };

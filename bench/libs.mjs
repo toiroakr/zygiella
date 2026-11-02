@@ -19,13 +19,14 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { tree, wide } from "./fixture.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
-// folder, package name; `initial` says whether the library reports what exists when it starts
+// folder, package name; `initial` says whether the library reports what exists when it starts, `mergesChange` whether
+// it cannot tell an add from a change, so a bulk add arrives as either
 const LIBS = {
   zygiella: { initial: true },
   chokidar: { dir: "chokidar", pkg: "chokidar", initial: true },
-  watcher: { dir: "watcher", pkg: "watcher", initial: false },
+  watcher: { dir: "watcher", pkg: "watcher", initial: false, mergesChange: true },
   "@parcel/watcher": { dir: "_parcel_watcher", pkg: "@parcel/watcher", initial: false },
-  "node-watch": { dir: "node-watch", pkg: "node-watch", initial: false },
+  "node-watch": { dir: "node-watch", pkg: "node-watch", initial: false, mergesChange: true },
 };
 const SCENARIOS = ["scan-tree", "idle-tree", "bulk-unlink", "bulk-add", "change-latency"];
 const NOT_A_COST = new Set(["events"]);
@@ -140,13 +141,15 @@ async function run(scenario, name, libs, dist, work) {
     const heap0 = process.memoryUsage().heapUsed;
     const rss0 = process.memoryUsage().rss;
     let events = 0;
+    let peak = rss0;
+    const timer = setInterval(() => (peak = Math.max(peak, process.memoryUsage().rss)), 2);
     const start = performance.now();
     const w = make(root, { initial });
     w.on(() => events++);
     await w.ready;
     const ms = performance.now() - start;
     await sleep(150); // late events and native threads settle
-    const peak = process.resourceUsage().maxRSS * 1024;
+    clearInterval(timer);
     gc();
     const m = process.memoryUsage();
     await w.close();
@@ -154,7 +157,7 @@ async function run(scenario, name, libs, dist, work) {
       readyMs: ms,
       heapMB: (m.heapUsed - heap0) / MB,
       rssGrowthMB: (m.rss - rss0) / MB,
-      rssPeakMB: peak / MB,
+      rssPeakGrowthMB: (peak - rss0) / MB,
       events: events - shape,
     };
   };
@@ -190,12 +193,7 @@ async function run(scenario, name, libs, dist, work) {
       await sleep(200);
       const start = performance.now();
       for (let i = 0; i < 3000; i++) writeFileSync(join(target, `n${i}.txt`), String(i));
-      // libraries that cannot tell an add from a change count both
-      await until(
-        () =>
-          counts.add + (LIBS[name].initial || name === "@parcel/watcher" ? 0 : counts.change) >=
-          3000,
-      );
+      await until(() => counts.add + (LIBS[name].mergesChange ? counts.change : 0) >= 3000);
       return { ms: performance.now() - start };
     }
     if (scenario === "change-latency") {
@@ -230,6 +228,8 @@ if (mode === "run") {
     rest.flatMap((a, i) => (a.startsWith("--") ? [[a.slice(2), rest[i + 1]]] : [])),
   );
   const runs = Number(flags.runs ?? 5);
+  if (!Number.isInteger(runs) || runs < 1)
+    throw new Error("--runs must be an integer of 1 or more");
   if (!flags.libs)
     throw new Error(
       "pass --libs <dir> with one folder per library, each holding its own node_modules: chokidar, watcher, _parcel_watcher (@parcel/watcher), node-watch",
