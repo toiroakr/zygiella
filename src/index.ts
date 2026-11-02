@@ -913,6 +913,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   function setEntry(path: string, entry: Entry): void {
     entries.set(path, entry);
     const parent = dirname(path);
+    if (gapAbove.has(path)) orphans = true;
     // a root has its own name as its parent, and listing it among its children would make `below` walk it forever
     if (parent === path) return;
     if (!entries.has(parent))
@@ -921,7 +922,6 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
         else gapAbove.add(above);
         if (dirname(above) === above) break;
       }
-    if (gapAbove.has(path)) orphans = true;
     let siblings = children.get(parent);
     if (!siblings) children.set(parent, (siblings = new Set()));
     siblings.add(path);
