@@ -173,7 +173,14 @@ async function run(scenario, name, libs, dist, work) {
   tree(root, { fanout: 8, depth: 3, perDir: 10 });
   const w = make(root, { initial: false });
   const counts = { add: 0, change: 0, unlink: 0 };
-  w.on((e) => (counts[e] = (counts[e] ?? 0) + 1));
+  // the paths, not the number of events: a library that reports one file as add and then change would count it twice
+  const unlinked = new Set();
+  const added = new Set();
+  w.on((e, p) => {
+    counts[e] = (counts[e] ?? 0) + 1;
+    if (e === "unlink") unlinked.add(p);
+    if (e === "add" || (LIBS[name].mergesChange && e === "change")) added.add(p);
+  });
   await w.ready;
   await sleep(100);
   try {
@@ -181,10 +188,10 @@ async function run(scenario, name, libs, dist, work) {
       const target = join(root, "bulk");
       wide(target, 3000);
       await sleep(400);
-      counts.unlink = 0;
+      unlinked.clear();
       const start = performance.now();
       for (const f of readdirSync(target)) rmSync(join(target, f));
-      await until(() => counts.unlink >= 3000);
+      await until(() => unlinked.size >= 3000);
       return { ms: performance.now() - start };
     }
     if (scenario === "bulk-add") {
@@ -193,7 +200,7 @@ async function run(scenario, name, libs, dist, work) {
       await sleep(200);
       const start = performance.now();
       for (let i = 0; i < 3000; i++) writeFileSync(join(target, `n${i}.txt`), String(i));
-      await until(() => counts.add + (LIBS[name].mergesChange ? counts.change : 0) >= 3000);
+      await until(() => added.size >= 3000);
       return { ms: performance.now() - start };
     }
     if (scenario === "change-latency") {
