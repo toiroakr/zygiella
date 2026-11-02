@@ -50,8 +50,11 @@ export interface Pending {
   isHeld(path: string): boolean;
   /** Reports the held unlink of `path` now. */
   flush(path: string): void;
-  /** Takes back the held unlinks below `path` that `only` accepts, reporting them unless `report` is false. */
-  dropHeld(path: string, only: (key: string) => boolean, report: boolean): void;
+  /**
+   * Takes back the held unlinks below `path` that `only` accepts, reporting them unless `report` is false. With
+   * `nested` false `path` is known to hold nothing below it (a file), so only its own is looked for.
+   */
+  dropHeld(path: string, only: (key: string) => boolean, report: boolean, nested?: boolean): void;
   /** Stops the add / change waiting for `path`, and returns it. */
   cancel(path: string): Settling | undefined;
   /** What to record for `path`: the entry as last reported. Undefined while its add is still waiting. */
@@ -212,13 +215,20 @@ export function pendingEvents({
     flush(path) {
       if (takeHeld(path)) dispatch("unlink", path);
     },
-    dropHeld(path, only, report) {
-      for (const [key, { timer }] of unlinks) {
-        if (!within(path, key) || !only(key) || (report && key === path)) continue;
-        clearTimeout(timer);
+    dropHeld(path, only, report, nested = true) {
+      const drop = (key: string) => {
+        clearTimeout(unlinks.get(key)!.timer);
         unlinks.delete(key);
         // what is below a directory that goes away is reported before the directory is
         if (report) dispatch("unlink", key);
+      };
+      // a file has nothing below it, and a bulk removal would otherwise read every held unlink once per file
+      if (!nested) {
+        if (!report && unlinks.has(path) && only(path)) drop(path);
+        return;
+      }
+      for (const key of unlinks.keys()) {
+        if (within(path, key) && only(key) && !(report && key === path)) drop(key);
       }
     },
     cancel(path) {

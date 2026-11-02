@@ -83,7 +83,7 @@ set), `moves.ts` (pairs a removed and an added file by device, inode, size and m
   `awaitWriteFinish` they wait for a stable size and mtime instead.
 - `ready` waits 50 ms after the watchers are attached, because `fs.watch` returns before FSEvents on macOS
   delivers. A test that makes a change right after `ready` covers this; do not shorten the wait without it.
-- A full read of a directory (the first scan, `rescan()`, the full read after a native event; not the named read of a large directory, `syncName`, which does not use the budget) hands its names, and then the entries it knew that the listing no longer has, to `eachName`, whose workers each take the next name from a budget of `SCAN_WORKERS` (256) shared by every full read, not to one `Promise.all` over all of them: a directory of 20,000 files held 20,000 pending promises and grew the heap by up to 160 MB. A directory always gets one worker even when the budget is spent, because the worker of its parent waits for it and a budget that could reach 0 would never finish; so the bound is 256 on each level of nesting (256 chains of 6 nested directories held 1792 workers), not 256 in all, and a scheduler that frees the parent's worker while its child is read would be needed to hold 256 in all. A worker that is freed goes to the oldest read that still has names (`lend`), because a large directory that began while the budget was spent would otherwise stay with one worker to the end: `ready` was 34 to 53% slower on ubuntu for a 20,000 file directory followed by small ones. A smaller batch that waits for its slowest entry made `ready` up to twice as slow on a wide tree.
+- A full read of a directory (the first scan, `rescan()`, the full read after a native event; not the named read of a large directory, `syncName`, which does not use the budget) hands its names, and then the entries it knew that the listing no longer has, to `eachName`, whose workers each take the next name from a budget of `SCAN_WORKERS` (4 times `UV_THREADPOOL_SIZE`, so 16 by default, at most 256) shared by every full read, not to one `Promise.all` over all of them: a directory of 20,000 files held 20,000 pending promises and grew the heap by up to 160 MB. A directory always gets one worker even when the budget is spent, because the worker of its parent waits for it and a budget that could reach 0 would never finish; so the bound is `SCAN_WORKERS` on each level of nesting (256 chains of 6 nested directories held 1792 workers when it was 256), not `SCAN_WORKERS` in all, and a scheduler that frees the parent's worker while its child is read would be needed to hold `SCAN_WORKERS` in all. A worker that is freed goes to the oldest read that still has names (`lend`), because a large directory that began while the budget was spent would otherwise stay with one worker to the end: `ready` was 34 to 53% slower on ubuntu for a 20,000 file directory followed by small ones. A smaller batch that waits for its slowest entry made `ready` up to twice as slow on a wide tree.
 - A root that did not exist when it was given to `watch()` or `add()` and appears later is read once more, with the directories below it
   that were read (`readAgain`), `READY_SETTLE_MS` after its first scan (`readAgainOnceDelivering`), for the reason of the wait before `ready`: a file made right after the first read of
   it is not delivered by an `fs.watch` that has just been attached, and would not be reported at all. `test/appeared-root.test.ts`
@@ -128,6 +128,16 @@ set), `moves.ts` (pairs a removed and an added file by device, inode, size and m
   platform.
 - Deleting a watched directory can fail for a moment on Windows, so the tests remove with retries.
 - When a test is flaky, find the lost or duplicated event instead of widening a timeout.
+
+## Benchmarks
+
+`bench/` measures the built package (`dist/`), so build first. `pnpm bench -- --out bench/results/name.json` records the
+install size, the import cost and each scenario (first scan of 20,000 files as a tree and as one directory, bulk
+unlink / add / rename, event latency, `rescan`, `snapshot`, many watchers) as a median of several runs in fresh processes;
+`pnpm bench:compare a.json b.json` prints two results. A machine drifts by 10 to 40% between runs, so to judge a change
+build the old and the new `dist` and run `pnpm bench:ab <old dist> <new dist>`, which alternates the two in every round.
+Do not trust a difference under 5%. Every scenario checks the events it should get, so a faster run that drops events fails.
+`--only a,b` runs some scenarios, and with an existing `--out` keeps the numbers of the others.
 
 ## Release
 
