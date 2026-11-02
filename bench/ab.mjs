@@ -7,30 +7,15 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseFlags, parseList } from "./args.mjs";
+import { SCENARIOS } from "./scenarios.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const [a, b, ...rest] = process.argv.slice(2);
+const [a, b, ...rest] = process.argv.slice(2).filter((arg) => arg !== "--");
 if (!a || !b) throw new Error("usage: node bench/ab.mjs <dist A> <dist B> [--runs 9] [--only a,b]");
 const flags = parseFlags(rest, ["runs", "only"]);
 const runs = Number(flags.runs ?? 9);
-const DEFAULT_SCENARIOS = [
-  "scan-tree",
-  "scan-wide",
-  "scan-tree-quiet",
-  "scan-tree-ignored",
-  "rescan",
-  "bulk-unlink",
-  "bulk-add",
-  "remove-directory",
-  "rename-burst",
-  "change-latency",
-  "add-latency",
-  "change-medium",
-  "scan-big-then-small",
-  "snapshot",
-  "many-watchers",
-];
-const names = parseList(flags.only, [...DEFAULT_SCENARIOS, "churn"], "--only") ?? DEFAULT_SCENARIOS;
+const names =
+  parseList(flags.only, SCENARIOS, "--only") ?? SCENARIOS.filter((name) => name !== "churn");
 const NOT_A_COST = new Set(["files", "entries", "paired"]);
 if (!Number.isInteger(runs) || runs < 1) throw new Error("--runs must be an integer of 1 or more");
 const work = mkdtempSync(join(tmpdir(), "zygiella-bench-ab-"));

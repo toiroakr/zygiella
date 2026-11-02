@@ -16,6 +16,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { brotliCompressSync, gunzipSync, gzipSync } from "node:zlib";
 import { parseFlags, parseList } from "./args.mjs";
+import { SCENARIOS } from "./scenarios.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const args = parseFlags(process.argv.slice(2), ["dist", "runs", "only", "out"]);
@@ -25,24 +26,6 @@ if (!Number.isInteger(runs) || runs < 1) throw new Error("--runs must be an inte
 const work = mkdtempSync(join(tmpdir(), "zygiella-bench-"));
 const entry = join(dist, "index.mjs");
 
-const SCENARIOS = [
-  "scan-tree",
-  "scan-wide",
-  "scan-tree-quiet",
-  "scan-tree-ignored",
-  "scan-big-then-small",
-  "rescan",
-  "bulk-unlink",
-  "bulk-add",
-  "remove-directory",
-  "change-latency",
-  "add-latency",
-  "change-medium",
-  "rename-burst",
-  "churn",
-  "many-watchers",
-  "snapshot",
-];
 const only = parseList(args.only, SCENARIOS, "--only");
 // numbers that describe the fixture or check the result, not a cost
 const NOT_A_COST = new Set(["files", "entries", "paired"]);
