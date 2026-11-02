@@ -184,7 +184,12 @@ async function run(scenario, name, libs, dist, work) {
   w.on((e, p) => {
     counts[e] = (counts[e] ?? 0) + 1;
     if (e === "unlink") unlinked.add(p);
-    if (e === "add" || (LIBS[name].mergesChange && e === "change")) added.add(p);
+    // only the files the scenario writes: no directory, and nothing from outside the target
+    if (
+      (e === "add" || (LIBS[name].mergesChange && e === "change")) &&
+      /[\\/]bulk[\\/]n\d+\.txt$/.test(p)
+    )
+      added.add(p);
   });
   await w.ready;
   await sleep(100);
