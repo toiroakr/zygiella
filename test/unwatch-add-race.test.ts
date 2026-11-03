@@ -56,7 +56,7 @@ afterEach(async () => {
   await rm(dir);
 });
 
-async function until(predicate: () => boolean, ms = 10_000): Promise<void> {
+async function until(predicate: () => boolean, ms = 3000): Promise<void> {
   const deadline = Date.now() + ms;
   while (!predicate()) {
     if (Date.now() > deadline) throw new Error("timed out waiting for the condition");
@@ -99,8 +99,11 @@ describe("unwatch then add of a directory while a read of one of its subdirector
     // the baseline of add() has listed `sub` and has not recorded its files, while the old read is let go
     await until(() => baseline.reached);
     old.release();
-    await rescanned;
+    // the read that rescan() starts for `sub` after the release waits for the baseline, which is held until here, so the
+    // rescan is not awaited before it
+    await Promise.race([rescanned, new Promise((resolve) => setTimeout(resolve, 200))]);
     baseline.release();
+    await rescanned;
     await w.ready;
     await sentinel(w, seen, dir);
 
