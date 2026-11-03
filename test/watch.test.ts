@@ -897,6 +897,20 @@ describe("add / unwatch / close", () => {
     await until(() => seen.length > 0);
     expect(seen).toEqual([["add", join(dir, "a.txt")]]);
   });
+
+  test("unwatch then add of the same directory while a read of it is going on does not report the directory", async () => {
+    const { w, seen } = await start(dir);
+    const reading = w.rescan();
+    await new Promise((r) => setImmediate(r));
+    w.unwatch(dir);
+    w.add(dir);
+    await reading;
+    await settle(100);
+    await writeFile(join(dir, "a.txt"), "1");
+    await until(() => seen.length > 0);
+    await settle(100);
+    expect(seen).toEqual([["add", join(dir, "a.txt")]]);
+  });
 });
 
 describe("missing paths", () => {

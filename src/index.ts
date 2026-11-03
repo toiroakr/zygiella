@@ -121,7 +121,12 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   const depthLeft = new Map<string, number>();
   /** Real paths of the directories from the watched root down to each directory, the directory's own last. */
   const ancestries = new Map<string, readonly string[]>();
-  const queues = new Map<string, { dirty: boolean; done: Promise<void> }>();
+  const queues = new Map<
+    string,
+    { dirty: boolean; fn: () => Promise<void>; done: Promise<void> }
+  >();
+  /** How often each root was released by `unwatch()`: a read of the root that began before is not the read of the root added again. */
+  const releases = new Map<string, number>();
   const denied = new Set<string>();
   const missingAtStart = new Set<string>();
   /** The real path of each directory root that has been read, which is what its tree watch reports below it. */
@@ -265,6 +270,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
 
   function forget(path: string): void {
     watchedRoots.delete(path);
+    releases.set(path, (releases.get(path) ?? 0) + 1);
     realRoots.delete(path);
     missingAtStart.delete(path);
     for (const key of denied) if (within(path, key)) denied.delete(key);
@@ -377,24 +383,29 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   function start(roots: string[], mode: Mode): Promise<void> {
     for (const root of roots) watchedRoots.add(root);
     return Promise.all(
-      roots.map((root) => serial(`root:${root}`, () => syncRoot(root, mode))),
+      roots.map((root) => serial(`root:${root}`, () => syncRoot(root, mode), true)),
     ).then(() => undefined);
   }
 
-  /** Runs `fn` for `key` one at a time; a request made while it runs makes it run once more afterwards. */
-  function serial(key: string, fn: () => Promise<void>): Promise<void> {
+  /**
+   * Runs `fn` for `key` one at a time; a request made while it runs makes it run once more afterwards. That run is of
+   * the request's own `fn` when it `replaces` the one that was waiting (a read that sets the baseline of a root added
+   * again), not of the `fn` that began, which would report as `live` what the baseline must only remember.
+   */
+  function serial(key: string, fn: () => Promise<void>, replaces = false): Promise<void> {
     const running = queues.get(key);
     if (running) {
       running.dirty = true;
+      if (replaces) running.fn = fn;
       return running.done;
     }
-    const queue = { dirty: false, done: Promise.resolve() };
+    const queue = { dirty: false, fn, done: Promise.resolve() };
     queues.set(key, queue);
     queue.done = (async () => {
       try {
         do {
           queue.dirty = false;
-          await fn().catch((error: NodeJS.ErrnoException) => fail(error, key));
+          await queue.fn().catch((error: NodeJS.ErrnoException) => fail(error, key));
         } while (queue.dirty && !closed);
       } finally {
         queues.delete(key);
@@ -419,9 +430,13 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     const previousProbe = probes.get(root);
     const previousParent = kinds.get(root) === "file" ? dirname(root) : undefined;
     if (mode !== "live") missingAtStart.delete(root);
+    const released = releases.get(root);
     const { info, link, real, unreadable } = await statRoot(root, mode);
-    if (closed || !watchedRoots.has(root)) {
-      natives.release(root);
+    // unwatch() forgot the root while it was read, and add() may have put it back: the entries this read compares with
+    // are gone, so it would report the root and all below it as new
+    if (closed || !watchedRoots.has(root) || releases.get(root) !== released) {
+      // a root added again has watches of its own now, which this read did not make and must not release
+      if (!watchedRoots.has(root)) natives.release(root);
       return;
     }
     if (info && !info.isDirectory()) denied.delete(root);
