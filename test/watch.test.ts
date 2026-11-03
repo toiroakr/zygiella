@@ -897,6 +897,37 @@ describe("add / unwatch / close", () => {
     await until(() => seen.length > 0);
     expect(seen).toEqual([["add", join(dir, "a.txt")]]);
   });
+
+  test("unwatch then add of the same directory while a read of it is going on does not report the directory", async () => {
+    const { w, seen } = await start(dir);
+    const reading = w.rescan();
+    await new Promise((r) => setImmediate(r));
+    w.unwatch(dir);
+    w.add(dir);
+    await reading;
+    await w.ready;
+    await writeFile(join(dir, "a.txt"), "1");
+    await until(() => seen.length > 0);
+    await settle(100);
+    expect(seen).toEqual([["add", join(dir, "a.txt")]]);
+  });
+
+  test("a root inside a directory that was released while it was read still gets its own baseline", async () => {
+    const sub = join(dir, "sub");
+    await mkdir(sub);
+    await writeFile(join(sub, "old.txt"), "1");
+    const { w, seen } = await start(dir, { depth: 0 });
+    const reading = w.rescan();
+    await new Promise((r) => setImmediate(r));
+    w.unwatch(dir);
+    w.add([dir, sub]);
+    await reading;
+    await w.ready;
+    await writeFile(join(sub, "old.txt"), "22");
+    await until(() => seen.length > 0);
+    await settle(100);
+    expect(seen).toEqual([["change", join(sub, "old.txt")]]);
+  });
 });
 
 describe("missing paths", () => {
