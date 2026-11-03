@@ -63,10 +63,10 @@ set), `moves.ts` (pairs a removed and an added file by device, inode, size and m
   removed the directory or retargeted a link above it), and the read is skipped if either is gone. The sync of a watched root itself goes through the queue of that root, which runs it after
   the scan that is going on, so it does not wait. chokidar serializes the work per root and replays what arrives during a scan after
   it. `test/initial-scan-race.test.ts`. The reads that `rescan()` starts for the directories below the roots wait for those scans too (`readAgain`).
-  `unwatch()` marks the jobs of `serial` that it releases (`released`, the root and the directories below it), because `add()` of the same root
-  records the baseline again at once: a read of such a job that is still going on is dropped at its next check (`released(path)`, which looks at the closest
-  job at or above the path, so a root added below a released one is not dropped), and the request of `add()` takes the place of the function of a released
-  job (`replacesReleased`), not of one that was not released, whose changes must be reported. `test/watch.test.ts`, "unwatch then add".
+  `unwatch()` marks the jobs of `serial` that it releases (`released` on the job: the root, and the directory and entry jobs below it that no other watched root covers), because `add()` of the same root
+  records the baseline again at once. The job is passed down the read (`syncRoot` to `syncName`), and a read whose job was released is dropped at its next check, so each read is judged by its own job (a root
+  added below a released one has a job of its own). The request of `add()` takes the place of the function of a released job (`replacesReleased`), not of one that was not released, whose changes must be reported.
+  `test/watch.test.ts`, "unwatch then add".
 - A native watcher error is retried by one re-sync of its directory (a read of everything for a tree watch), except `EMFILE` / `ENOSPC` and the fourth error
   in a row without an event (`native.ts`), after which only `rescan()` lets that path be watched again (`retry`; releasing it with `unwatch()` forgets it too), and nothing below a root whose tree watch was given up is watched one by one until then (`blockedTrees`); the state is recorded before the `error` event is emitted; a re-watch after `EMFILE` on macOS made libuv rebuild its one stream for
   every handle, and the process never reached `ready`.
