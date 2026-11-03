@@ -664,11 +664,15 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     if (failure) throw failure.error;
   }
 
-  /** Whether a read of a root above `path` was released by `unwatch()` while it ran, and is going on still. */
+  /**
+   * Whether the read of the root that `path` belongs to was released by `unwatch()` while it ran, and is going on still.
+   * Only the innermost root counts: a root added below a released one has a read of its own.
+   */
   function released(path: string): boolean {
+    let owner: string | undefined;
     for (const root of watchedRoots)
-      if (within(root, path) && queues.get(`root:${root}`)?.released) return true;
-    return false;
+      if (within(root, path) && (owner === undefined || root.length > owner.length)) owner = root;
+    return owner !== undefined && queues.get(`root:${owner}`)?.released === true;
   }
 
   async function readDir(
