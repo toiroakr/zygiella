@@ -1,5 +1,13 @@
 # zygiella
 
+## 0.1.2
+
+### Patch Changes
+
+- fd7e682: Make forgetting a path cost what is below it, not what is tracked. Every removal of a file or directory tested every tracked path against it, so deleting 3,000 files from a directory of a tree of 5,000 entries took 3.2 to 6.7 s of CPU on Linux, 2,000 renames in one directory 0.65 s, and the cost grew with the square of the tree. The entries below a path are now found through the tracked directories, which makes those two 0.2 s and 0.27 s, and holding unlinks back for `atomic` no longer reads every held unlink for each file removed. The events reported do not change.
+- fd7e682: Lower the memory a scan needs further by sizing the budget of entries read at once on each level of nesting from the thread pool instead of fixing it at 256: 4 times `UV_THREADPOOL_SIZE`, but at least 16 and at most 256 (so 16 unless the pool is larger than 4). The thread pool runs only that many calls at a time, so a deeper queue only holds memory: on a tree of 20,000 files the resident set grows by about 20% less than with 256, up to 45% less on Linux for one wide directory (41 to 22 MB), and `ready` is not later. The events reported do not change.
+- fd7e682: Leave the implementation comments out of `dist/index.mjs`, which makes it about 5 kB smaller (about 2 kB gzipped). The type declarations keep their documentation.
+
 ## 0.1.1
 
 ### Patch Changes
