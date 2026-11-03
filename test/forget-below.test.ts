@@ -1,8 +1,27 @@
 import { mkdir, mkdtemp, realpath, rm as removeOnce, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { watch, type FSWatcher } from "../src/index.ts";
+
+// Silent native watches that the test drives itself: a native event for the removal below is not always delivered on
+// macOS when the machine is busy (an independent fs.watch of the directory got none either). The test raises the event
+// of the directory alone, so that only the read of that directory sees the removal and what it reports is checked.
+const native = vi.hoisted(() => ({
+  emitters: [] as Array<{ path: string; emitter: import("node:events").EventEmitter }>,
+}));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const { EventEmitter } = await import("node:events");
+  return {
+    ...(await importOriginal<typeof import("node:fs")>()),
+    watch: (path: string) => {
+      const emitter = Object.assign(new EventEmitter(), { close: () => {} });
+      native.emitters.push({ path: String(path), emitter });
+      return emitter;
+    },
+  };
+});
 
 const rm = (path: string) =>
   removeOnce(path, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
@@ -13,6 +32,7 @@ let watchers: FSWatcher[];
 beforeEach(async () => {
   dir = await realpath(await mkdtemp(join(tmpdir(), "zygiella-")));
   watchers = [];
+  native.emitters.length = 0;
 });
 
 afterEach(async () => {
@@ -54,6 +74,8 @@ test("a removed directory reports what a watched root below an untracked directo
   await writeFile(join(deep, "f.txt"), "1");
   const { seen } = await start([dir, deep], { depth: 0 });
   await rm(join(dir, "sub"));
+  for (const { path, emitter } of native.emitters)
+    if (path === dir) emitter.emit("change", "rename", "sub");
   await until(() =>
     seen.some(([event, path]) => event === "unlinkDir" && path === join(dir, "sub")),
   );

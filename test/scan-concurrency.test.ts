@@ -38,6 +38,11 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 
 const { watch } = await import("../src/index.ts");
 
+// The fixtures write up to 3,400 files before the scan starts. A test takes about 0.7 s on an idle machine and more than 5 s
+// when the files of other test files are written at the same time (it timed out in 2 of 14 and 5 of 12 runs of the whole
+// suite under CPU load), which is the time of the writes and not an event that is late.
+vi.setConfig({ testTimeout: 30_000 });
+
 const rm = (path: string, options: Parameters<typeof removeOnce>[1] = {}) =>
   removeOnce(path, { maxRetries: 10, retryDelay: 50, ...options });
 

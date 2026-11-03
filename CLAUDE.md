@@ -132,6 +132,10 @@ set), `moves.ts` (pairs a removed and an added file by device, inode, size and m
   platform.
 - Deleting a watched directory can fail for a moment on Windows, so the tests remove with retries.
 - When a test is flaky, find the lost or duplicated event instead of widening a timeout.
+- A test whose fixture writes thousands of files gets an explicit timeout (`test/scan-concurrency.test.ts`, 30 s): that is
+  the time of the writes under load, not the latency of an event. Do not use it to hide a late or lost event.
+- A test that depends on a native event that the OS may not deliver on a busy machine (macOS) mocks `fs.watch` as silent
+  and raises the event itself (`test/forget-below.test.ts`), so that what it checks is the report and not the delivery.
 
 ## Benchmarks
 
