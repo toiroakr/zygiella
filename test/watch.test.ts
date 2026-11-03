@@ -905,7 +905,7 @@ describe("add / unwatch / close", () => {
     w.unwatch(dir);
     w.add(dir);
     await reading;
-    await settle(100);
+    await w.ready;
     await writeFile(join(dir, "a.txt"), "1");
     await until(() => seen.length > 0);
     await settle(100);
