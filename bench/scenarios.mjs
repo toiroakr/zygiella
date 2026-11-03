@@ -1,0 +1,18 @@
+export const SCENARIOS = [
+  "scan-tree",
+  "scan-wide",
+  "scan-tree-quiet",
+  "scan-tree-ignored",
+  "scan-big-then-small",
+  "rescan",
+  "bulk-unlink",
+  "bulk-add",
+  "remove-directory",
+  "change-latency",
+  "add-latency",
+  "change-medium",
+  "rename-burst",
+  "churn",
+  "many-watchers",
+  "snapshot",
+];

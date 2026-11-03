@@ -1,0 +1,69 @@
+// Runs the scenarios against two builds, alternating A and B in every round so that drift of the machine hits both
+// the same way, and prints the median of each metric:
+//   node bench/ab.mjs <dist A> <dist B> [--runs 9] [--only scan-tree,bulk-unlink]
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseFlags, parseList } from "./args.mjs";
+import { SCENARIOS } from "./scenarios.mjs";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const [a, b, ...rest] = process.argv.slice(2).filter((arg) => arg !== "--");
+if (!a || !b) throw new Error("usage: node bench/ab.mjs <dist A> <dist B> [--runs 9] [--only a,b]");
+const flags = parseFlags(rest, ["runs", "only"]);
+const runs = Number(flags.runs ?? 9);
+const names =
+  parseList(flags.only, SCENARIOS, "--only") ?? SCENARIOS.filter((name) => name !== "churn");
+const NOT_A_COST = new Set(["files", "entries", "paired"]);
+if (!Number.isInteger(runs) || runs < 1) throw new Error("--runs must be an integer of 1 or more");
+const work = mkdtempSync(join(tmpdir(), "zygiella-bench-ab-"));
+
+const median = (values) => {
+  const sorted = [...values].sort((x, y) => x - y);
+  const mid = sorted.length >> 1;
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+};
+const once = (name, dist) => {
+  const result = spawnSync(
+    process.execPath,
+    ["--expose-gc", join(here, "scenario.mjs"), name, join(resolve(dist), "index.mjs"), work],
+    { encoding: "utf8", maxBuffer: 1 << 24 },
+  );
+  if (result.status !== 0) throw new Error(`${name} failed:\n${result.stderr}`);
+  return JSON.parse(result.stdout.trim().split("\n").at(-1));
+};
+const fmt = (n) =>
+  Math.abs(n) >= 1000 ? n.toFixed(0) : Math.abs(n) >= 10 ? n.toFixed(1) : n.toFixed(2);
+
+try {
+  for (const name of names) {
+    const samples = { A: {}, B: {} };
+    for (let i = 0; i < runs; i++) {
+      for (const [label, dist] of i % 2
+        ? [
+            ["B", b],
+            ["A", a],
+          ]
+        : [
+            ["A", a],
+            ["B", b],
+          ]) {
+        for (const [key, value] of Object.entries(once(name, dist)))
+          if (!NOT_A_COST.has(key)) (samples[label][key] ??= []).push(value);
+      }
+    }
+    for (const key of Object.keys(samples.A)) {
+      const x = median(samples.A[key]);
+      const y = median(samples.B[key]);
+      const change = y === x ? 0 : (y - x) / Math.abs(x);
+      const mark = change > 0.05 ? "  WORSE" : change < -0.05 ? "  better" : "";
+      console.log(
+        `${`${name}.${key}`.padEnd(34)} ${fmt(x).padStart(9)} -> ${fmt(y).padStart(9)} ${(change * 100).toFixed(1).padStart(7)}%${mark}`,
+      );
+    }
+  }
+} finally {
+  rmSync(work, { recursive: true, force: true });
+}
