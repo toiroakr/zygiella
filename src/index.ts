@@ -275,7 +275,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     // a directory that another root still covers keeps its entries, so what is reading it has not become stale
     const covered = (dir: string) => [...watchedRoots].some((root) => within(root, dir));
     for (const [key, job] of queues) {
-      if (key === `root:${path}`) job.released = true;
+      if (key === `root:${path}` && !covered(path)) job.released = true;
       else if (key.startsWith("dir:") && within(path, key.slice(4)) && !covered(key.slice(4)))
         job.released = true;
       else if (key.startsWith("entry:") && within(path, key.slice(6)) && !covered(key.slice(6)))

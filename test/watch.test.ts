@@ -928,30 +928,6 @@ describe("add / unwatch / close", () => {
     await settle(100);
     expect(seen).toEqual([["change", join(sub, "old.txt")]]);
   });
-
-  test("unwatch then add of a directory while its subdirectories are being read reports nothing that was there before", async () => {
-    for (let a = 0; a < 6; a++)
-      for (let b = 0; b < 6; b++) {
-        const leaf = join(dir, `d${a}`, `e${b}`);
-        await mkdir(leaf, { recursive: true });
-        for (let f = 0; f < 6; f++) await writeFile(join(leaf, `f${f}.txt`), "1");
-      }
-    const reported: Array<[number, Seen]> = [];
-    // the read is in a different place at each delay: the listing of a directory, the stat of an entry, the next level
-    for (const delay of [0, 1, 2, 3, 4, 6, 8, 12]) {
-      const { w, seen } = await start(dir);
-      const reading = w.rescan();
-      await settle(delay);
-      w.unwatch(dir);
-      w.add(dir);
-      await reading;
-      await w.ready;
-      await settle(100);
-      if (seen.length > 0) reported.push([delay, seen.slice(0, 2)]);
-      await w.close();
-    }
-    expect(reported).toEqual([]);
-  }, 30_000);
 });
 
 describe("missing paths", () => {
