@@ -126,6 +126,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     string,
     { dirty: boolean; released: boolean; fn: () => Promise<void>; done: Promise<void> }
   >();
+  /** How many jobs in `queues` are `released`: nothing is looked up while it is 0, which is nearly always. */
+  let releasing = 0;
   const denied = new Set<string>();
   const missingAtStart = new Set<string>();
   /** The real path of each directory root that has been read, which is what its tree watch reports below it. */
@@ -269,8 +271,14 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
 
   function forget(path: string): void {
     watchedRoots.delete(path);
-    const reading = queues.get(`root:${path}`);
-    if (reading) reading.released = true;
+    for (const [key, queue] of queues)
+      if (
+        !queue.released &&
+        (key === `root:${path}` || (key.startsWith("dir:") && within(path, key.slice(4))))
+      ) {
+        queue.released = true;
+        releasing++;
+      }
     realRoots.delete(path);
     missingAtStart.delete(path);
     for (const key of denied) if (within(path, key)) denied.delete(key);
@@ -336,10 +344,14 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     for (const depth of [...levels.keys()].sort((a, b) => a - b)) {
       await Promise.all(
         levels.get(depth)!.map((dir) => {
-          const left = depthLeft.get(dir);
-          const ancestry = ancestries.get(dir);
-          return left !== undefined && ancestry && !watchedRoots.has(dir)
-            ? serial(`dir:${dir}`, () => syncDir(dir, left, "live", ancestry))
+          return depthLeft.has(dir) && !watchedRoots.has(dir)
+            ? serial(`dir:${dir}`, async () => {
+                // an add() of a root above may be reading the directory for its baseline, which this read must not overtake
+                await scansAbove(dir);
+                const left = depthLeft.get(dir);
+                const ancestry = ancestries.get(dir);
+                if (left !== undefined && ancestry) await syncDir(dir, left, "live", ancestry);
+              })
             : undefined;
         }),
       );
@@ -406,10 +418,14 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
       try {
         do {
           queue.dirty = false;
-          queue.released = false;
+          if (queue.released) {
+            queue.released = false;
+            releasing--;
+          }
           await queue.fn().catch((error: NodeJS.ErrnoException) => fail(error, key));
         } while (queue.dirty && !closed);
       } finally {
+        if (queue.released) releasing--;
         queues.delete(key);
       }
     })();
@@ -665,14 +681,18 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
   }
 
   /**
-   * Whether the read of the root that `path` belongs to was released by `unwatch()` while it ran, and is going on still.
-   * Only the innermost root counts: a root added below a released one has a read of its own.
+   * Whether the read that is going on for `path` was released by `unwatch()` while it ran. The read is the job of the
+   * closest directory or root at or above `path` that has one: a root added below a released one, or a directory read
+   * that began after the release, has a job of its own.
    */
   function released(path: string): boolean {
-    let owner: string | undefined;
-    for (const root of watchedRoots)
-      if (within(root, path) && (owner === undefined || root.length > owner.length)) owner = root;
-    return owner !== undefined && queues.get(`root:${owner}`)?.released === true;
+    if (releasing === 0) return false;
+    for (let at = path; ; at = dirname(at)) {
+      const queue =
+        queues.get(`dir:${at}`) ?? (watchedRoots.has(at) ? queues.get(`root:${at}`) : undefined);
+      if (queue) return queue.released;
+      if (dirname(at) === at) return false;
+    }
   }
 
   async function readDir(
@@ -703,20 +723,21 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     await eachName(names, (name) =>
       syncEntry(dir, name, left, mode, ancestry, seen, uninspectable),
     );
-    if (closed) return;
+    if (closed || released(dir)) return;
     const listed = new Set(names);
     // One name at a time would make a bulk removal wait for a round trip per file, and waiting for all of them before
     // removing any would leave the window open again, so each is removed as soon as its own check is done.
     await eachName(Array.from(children.get(dir) ?? []), async (path) => {
       if (seen.has(path) || uninspectable.has(path) || recorded.has(path) || watchedRoots.has(path))
         return;
-      if (!covered() || !children.get(dir)?.has(path)) return;
+      if (released(dir) || !covered() || !children.get(dir)?.has(path)) return;
       // The siblings may have taken long: a file that was missing at its read can be back and reported since then. Not
       // a directory: one that is being deleted can still be read, and keeping it would keep its native watcher open.
       if (entries.get(path)?.dir === false) {
         if ((await examine(path)) || closed) return;
         // what was true before the check may not be any more: `add()` can have made the path a root of its own
-        if (watchedRoots.has(path) || !covered() || !children.get(dir)?.has(path)) return;
+        if (released(dir) || watchedRoots.has(path) || !covered() || !children.get(dir)?.has(path))
+          return;
         // a refused read does not keep a name the listing did not have (a directory that is being deleted can refuse one),
         // but a name it had, whose first read found it missing, is not known to be gone
         if (listed.has(basename(path)) && uninspectable.has(path)) return;
@@ -769,7 +790,8 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     const found = await inspect(path, left, mode, ancestry, failed);
     if (!found) return false;
     // an unlink listener may have unwatched the directory while the read was in flight
-    if (closed || ![...watchedRoots].some((root) => within(root, dir))) return true;
+    if (closed || released(dir) || ![...watchedRoots].some((root) => within(root, dir)))
+      return true;
     seen.add(path);
     await visit(
       path,
@@ -800,7 +822,14 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     record();
     await syncEntry(dir, name, left, mode, ancestry, seen, uninspectable);
     record();
-    if (closed || seen.has(path) || uninspectable.has(path) || watchedRoots.has(path)) return;
+    if (
+      closed ||
+      released(dir) ||
+      seen.has(path) ||
+      uninspectable.has(path) ||
+      watchedRoots.has(path)
+    )
+      return;
     if (children.get(dir)?.has(path)) remove(path, true, undefined, mode !== "seed");
   }
 
