@@ -60,6 +60,8 @@ test("a change is reported once although the timer keeps reading", async () => {
 });
 
 test("the next read is scheduled once the previous one has finished, not on a fixed period", async () => {
+  // captured before faking, so the loop below can let the real I/O of the first read run
+  const realTimeout = globalThis.setTimeout;
   vi.useFakeTimers();
   try {
     let finish!: () => void;
@@ -69,8 +71,13 @@ test("the next read is scheduled once the previous one has finished, not on a fi
       .mockImplementation(() => new Promise<void>((done) => (finish = done)));
     let ready = false;
     void watcher.ready.then(() => (ready = true));
-    // the first read of the directory is real I/O, so the settle wait is only registered after it
-    for (let i = 0; i < 100 && !ready; i++) await vi.advanceTimersByTimeAsync(10);
+    // the first read of the directory is real I/O, so the settle wait is only registered after it;
+    // advancing fake time alone never yields to the event loop, and on a loaded machine the loop
+    // ran out before that I/O had come back
+    for (let i = 0; i < 1000 && !ready; i++) {
+      await new Promise((done) => realTimeout(done, 5));
+      await vi.advanceTimersByTimeAsync(10);
+    }
     expect(ready).toBe(true);
     await vi.advanceTimersByTimeAsync(1000);
     expect(rescan).toHaveBeenCalledTimes(1);
