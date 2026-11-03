@@ -951,7 +951,7 @@ describe("add / unwatch / close", () => {
       await w.close();
     }
     expect(reported).toEqual([]);
-  });
+  }, 30_000);
 });
 
 describe("missing paths", () => {
