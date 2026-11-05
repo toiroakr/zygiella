@@ -17,6 +17,13 @@
   "rangeStrategy": "bump",
   "packageRules": [
     {
+      "description": "The published Node.js support floor is a compatibility policy, not a tool version.",
+      "matchManagers": ["npm"],
+      "matchDepTypes": ["engines"],
+      "matchPackageNames": ["node"],
+      "enabled": false
+    },
+    {
       "matchDepTypes": ["devDependencies"],
       "automerge": true,
       "rangeStrategy": "bump"
