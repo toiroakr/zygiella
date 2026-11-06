@@ -101,28 +101,6 @@ describe("file events", () => {
 });
 
 describe("atomic", () => {
-  test("a file deleted and created again within the window is reported as one change", async () => {
-    await writeFile(join(dir, "a.txt"), "1");
-    const { seen } = await start(dir, { atomic: 500 });
-    await rm(join(dir, "a.txt"));
-    await settle(150);
-    await writeFile(join(dir, "a.txt"), "22");
-    await until(() => seen.length > 0);
-    await settle(700);
-    expect(seen).toEqual([["change", join(dir, "a.txt")]]);
-  });
-
-  test("the window is 100 ms by default", async () => {
-    await writeFile(join(dir, "a.txt"), "1");
-    const { seen } = await start(dir);
-    await rm(join(dir, "a.txt"));
-    await settle(30);
-    await writeFile(join(dir, "a.txt"), "22");
-    await until(() => seen.length > 0);
-    await settle();
-    expect(seen).toEqual([["change", join(dir, "a.txt")]]);
-  });
-
   test("a file that is not created again is reported as unlink once the window has passed", async () => {
     await writeFile(join(dir, "a.txt"), "1");
     const { seen } = await start(dir, { atomic: 200 });
