@@ -5,10 +5,10 @@ A dependency-free file watcher for Node.js, built on `fs.watch`. It covers the p
 means changing the import and, if you construct or test for `FSWatcher` yourself, that code too (see
 [Migrating from chokidar](#migrating-from-chokidar)).
 
-**Requires Node.js 22.18 or later.**
+**Requires Node.js 22.23.4 or later.**
 
 - No dependencies.
-- Linux, macOS and Windows, tested on Node.js 22.18 and 24.
+- Linux, macOS and Windows, tested on Node.js 22.23.4, 24 and 26.
 - Reports `add`, `addDir`, `change`, `unlink` and `unlinkDir` for files and directories, including paths that do
   not exist yet.
 
@@ -18,7 +18,7 @@ means changing the import and, if you construct or test for `FSWatcher` yourself
 npm install zygiella
 ```
 
-Node.js 22.18 or later.
+Node.js 22.23.4 or later.
 
 ## Usage
 
@@ -116,7 +116,7 @@ the list of such paths, see [`watch()`](#watchpaths-options)), and a directory t
 
 - A directory that cannot be read (`EACCES`, `EPERM`) is emitted as `error`; `ignorePermissionErrors: true`
   silences it. Without an `error` listener, an `EventEmitter` throws on `error`.
-- Node.js 22.18 or later is required.
+- Node.js 22.23.4 or later is required.
 
 ## API
 
