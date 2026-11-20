@@ -28,7 +28,7 @@ const FEATURE_UNAVAILABLE = "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM";
 
 export interface NativeWatches {
   /** Watches `dir` alone. */
-  ensure(dir: string): void;
+  ensure(dir: string, physicalPath?: string): void;
   /**
    * Watches `root` and everything below it with one native watch. False when that is not possible here, in which
    * case the caller watches each directory with `ensure`.
@@ -112,11 +112,13 @@ export function nativeWatches({
   };
 
   return {
-    ensure(dir) {
+    ensure(dir, physicalPath) {
       if (closed || watchers.has(dir) || blocked.has(dir)) return;
       for (const root of blockedTrees) if (within(root, dir)) return;
       try {
-        const watcher = nativeWatch(dir, { persistent });
+        // FSEvents observes the named path, not the destination of a symlink. Watch
+        // the resolved directory while keeping `dir` as the logical event path.
+        const watcher = nativeWatch(physicalPath ?? dir, { persistent });
         watcher.on("change", (_type, name) => {
           rewatches.delete(dir);
           onChange(dir, name ? String(name) : undefined);
