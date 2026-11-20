@@ -155,7 +155,7 @@ describe.skipIf(!recursiveHere)("on macOS", () => {
     const { seen } = await start(dir);
     expect(native.calls).toEqual([
       { path: dir, recursive: true },
-      { path: join(dir, "link"), recursive: false },
+      { path: outside, recursive: false },
     ]);
     await writeUntil(join(outside, "a.txt"), () => seen.length > 0);
     expect(seen[0]).toEqual(["add", join(dir, "link", "a.txt")]);
@@ -167,7 +167,7 @@ describe.skipIf(!recursiveHere)("on macOS", () => {
     // a file first: the watch on the link delivers once this is reported, so the directory below is not missed
     await writeUntil(join(outside, "armed.txt"), () => seen.length > 0);
     await mkdir(join(outside, "sub"));
-    await until(() => native.calls.some((call) => call.path === join(dir, "link", "sub")));
+    await until(() => native.calls.some((call) => call.path === join(outside, "sub")));
     const file = join(dir, "link", "sub", "a.txt");
     await writeUntil(join(outside, "sub", "a.txt"), () => seen.some(([, path]) => path === file));
     expect(seen).toContainEqual(["add", file]);
