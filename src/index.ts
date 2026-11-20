@@ -702,7 +702,7 @@ export function watch(paths: string | readonly string[], options: WatchOptions =
     depthLeft.set(dir, left);
     ancestries.set(dir, ancestry);
     if (physical(dir, ancestry)) natives.covered(dir, waitedFor(dir));
-    else natives.ensure(dir);
+    else natives.ensure(dir, ancestry.at(-1));
     const names = await readdir(dir).catch((error: NodeJS.ErrnoException) => {
       fail(error, dir);
       return undefined;
