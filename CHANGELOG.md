@@ -1,5 +1,11 @@
 # zygiella
 
+## 0.1.4
+
+### Patch Changes
+
+- fde2ff2: Fix file change notifications under followed symbolic links by watching the resolved directory, including after the link target changes.
+
 ## 0.1.3
 
 ### Patch Changes
