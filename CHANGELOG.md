@@ -1,5 +1,11 @@
 # zygiella
 
+## 0.1.5
+
+### Patch Changes
+
+- 8e2f1c6: Restore the minimum supported Node.js version to 22.18.0.
+
 ## 0.1.4
 
 ### Patch Changes
